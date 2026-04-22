@@ -13,7 +13,7 @@ body {
   font-family:'Segoe UI',sans-serif;
   height:100vh; display:flex; flex-direction:column;
   overflow:hidden; user-select:none;
-  padding-bottom:80px;
+  /*padding-bottom:80px;*/
 }
 
 #toolbar {
@@ -92,7 +92,7 @@ body {
 }
 
 #pianoArea {
-  height:100px; background:#111; flex-shrink:0;
+  height:80px; background:#111; flex-shrink:0;
   border-top:2px solid #333; position:relative; overflow:hidden;
 }
 #pianoCanvas { display:block; }
@@ -159,6 +159,33 @@ body {
 </head>
 <body>
 
+
+
+<div id="pianoArea">
+  <canvas id="pianoCanvas"></canvas>
+</div>
+
+<div id="scoreArea">
+  <div id="scoreInner">
+    <canvas id="scoreCanvas"></canvas>
+    <div id="seekOverlay"></div>
+    <div id="cursor"></div>
+  </div>
+  <div id="scrollTrack">
+    <div id="scrollThumb"></div>
+  </div>
+  <div id="welcome">
+    <h2>🎹 DIDI Piano</h2>
+    <p>Notes on staff lines · duration as bars<br>
+    DidiPiano is a mix between traditional music sheet and waterfall.<br>
+    It is meant to help "read" a score and learn to play it.
+    </p>
+    <button onclick="document.getElementById('fileInput').click()">Load MIDI File</button>
+    <p style="margin-top:10px;font-size:11px;color:#999">Designed by Didier Agani, co-coded by an AI agent</p>
+  </div>
+</div>
+
+
 <div id="toolbar">
   <div class="tg">
     <button id="btnLoad">📂 Load</button>
@@ -170,12 +197,12 @@ body {
     <span id="timeDisplay">0:00 / 0:00</span>
   </div>
   <div class="tg">
-    <input type="range" id="speedSlider" min=".25" max="2" step=".05" value="1">
+    <input type="range" id="speedSlider" min=".5" max="1.5" step=".05" value="1">
     <span id="speedVal">1.0×</span>
   </div>
   <div class="tg">
-    <input type="range" id="zoomSlider" min="30" max="300" step="5" value="60">
-    <span id="zoomVal">60 px/beat</span>
+    <input type="range" id="zoomSlider" min="10" max="120" step="5" value="60">
+    <span id="zoomVal">60 px/b</span>
   </div>
   <div class="tg">
     <button class="transpose-btn" id="btnTransDown">−</button>
@@ -191,28 +218,6 @@ body {
     <button id="btnTracks">🎹 Tracks</button>
     <button id="btnPrint">🖨 Print</button>
   </div>
-</div>
-
-<div id="scoreArea">
-  <div id="scoreInner">
-    <canvas id="scoreCanvas"></canvas>
-    <div id="seekOverlay"></div>
-    <div id="cursor"></div>
-  </div>
-  <div id="scrollTrack">
-    <div id="scrollThumb"></div>
-  </div>
-  <div id="welcome">
-    <h2>🎹 DIDI Piano</h2>
-    <p>Notes on staff lines · duration as bars<br>
-    Drag on score to seek · Use scrollbar to navigate</p>
-    <button onclick="document.getElementById('fileInput').click()">Load MIDI File</button>
-    <p style="margin-top:10px;font-size:11px;color:#999">Drag & drop · Space=play · ←→=seek · ↑↓=scroll · []=transpose</p>
-  </div>
-</div>
-
-<div id="pianoArea">
-  <canvas id="pianoCanvas"></canvas>
 </div>
 
 <div id="dropZone">📁 Drop MIDI file here</div>
@@ -1330,7 +1335,7 @@ document.getElementById('btnPlay').addEventListener('click',()=>{togglePlay();bl
 document.getElementById('btnStop').addEventListener('click',()=>{stopPlayback();blurToolbar();});
 document.getElementById('speedSlider').addEventListener('input',e=>{playbackSpeed=+e.target.value;document.getElementById('speedVal').textContent=playbackSpeed.toFixed(2)+'×';if(isPlaying){Tone.Transport.cancel();scheduledIds=[];scheduleAudio();}});
 document.getElementById('speedSlider').addEventListener('change',blurToolbar);
-document.getElementById('zoomSlider').addEventListener('input',e=>{pxPerBeat=+e.target.value;document.getElementById('zoomVal').textContent=pxPerBeat+' px/beat';if(midi)fullRebuild();});
+document.getElementById('zoomSlider').addEventListener('input',e=>{pxPerBeat=+e.target.value;document.getElementById('zoomVal').textContent=pxPerBeat+' px/b';if(midi)fullRebuild();});
 document.getElementById('zoomSlider').addEventListener('change',blurToolbar);
 document.getElementById('metroCheck').addEventListener('change',e=>{metronomeOn=e.target.checked;if(isPlaying){Tone.Transport.cancel();scheduledIds=[];scheduleAudio();}blurToolbar();});
 document.getElementById('btnTracks').addEventListener('click',()=>{showTracks();blurToolbar();});
