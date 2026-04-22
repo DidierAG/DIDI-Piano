@@ -8,10 +8,12 @@
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.min.js"></script>
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
+html, body { height: 100%; }
 body {
   background:#1a1a2e; color:#e0e0e0;
   font-family:'Segoe UI',sans-serif;
-  height:100vh; display:flex; flex-direction:column;
+  height:100vh; height:100dvh;
+  display:flex; flex-direction:column;
   overflow:hidden; user-select:none;
 }
 
@@ -58,7 +60,6 @@ body {
   overflow:hidden;
   position:relative; min-height:0;
 }
-/* VIRTUALIZED: canvases now sit fixed in viewport, translated via transform */
 #scoreCanvas {
   display:block;
   position:absolute;
@@ -169,29 +170,6 @@ body {
 </head>
 <body>
 
-<div id="pianoArea">
-  <canvas id="pianoCanvas"></canvas>
-</div>
-
-<div id="scoreArea">
-  <canvas id="scoreCanvas"></canvas>
-  <canvas id="overlayCanvas"></canvas>
-  <div id="cursor"></div>
-  <div id="seekOverlay"></div>
-  <div id="scrollTrack">
-    <div id="scrollThumb"></div>
-  </div>
-  <div id="welcome">
-    <h2>🎹 DIDI Piano</h2>
-    <p>Notes on staff lines · duration as bars<br>
-    DidiPiano is a mix between traditional music sheet and waterfall.<br>
-    It is meant to help "read" a score and learn to play it.
-    </p>
-    <button onclick="document.getElementById('fileInput').click()">Load MIDI File</button>
-    <p style="margin-top:10px;font-size:11px;color:#999">Designed by Didier Agani, co-coded by an AI agent</p>
-  </div>
-</div>
-
 <div id="toolbar">
   <div class="tg">
     <button id="btnLoad">📂 Load</button>
@@ -223,6 +201,29 @@ body {
   <div class="tg">
     <button id="btnTracks">🎹 Tracks</button>
     <button id="btnPrint">🖨 Print</button>
+  </div>
+</div>
+
+<div id="pianoArea">
+  <canvas id="pianoCanvas"></canvas>
+</div>
+
+<div id="scoreArea">
+  <canvas id="scoreCanvas"></canvas>
+  <canvas id="overlayCanvas"></canvas>
+  <div id="cursor"></div>
+  <div id="seekOverlay"></div>
+  <div id="scrollTrack">
+    <div id="scrollThumb"></div>
+  </div>
+  <div id="welcome">
+    <h2>🎹 DIDI Piano</h2>
+    <p>Notes on staff lines · duration as bars<br>
+    DidiPiano is a mix between traditional music sheet and waterfall.<br>
+    It is meant to help "read" a score and learn to play it.
+    </p>
+    <button onclick="document.getElementById('fileInput').click()">Load MIDI File</button>
+    <p style="margin-top:10px;font-size:11px;color:#999">Designed by Didier Agani, co-coded by an AI agent</p>
   </div>
 </div>
 
@@ -259,7 +260,6 @@ const TRACK_COLORS=[
 const L={CLEF_W:56,MARGIN_LEFT:24,MARGIN_RIGHT:24,LINE_GAP:11,NOTE_H:10,RADIUS:4,ROW_PAD_T:30,STAFF_GAP:54,ROW_GAP:60,ROW_PAD_B:26};
 const TITLE_HEIGHT=50;
 
-// Virtualization config
 const VIRT_BUFFER_ROWS = 2;
 const REDRAW_THRESHOLD_PX = 1;
 
@@ -288,14 +288,12 @@ let layout={measuresPerRow:4,rows:[],totalHeight:0,measures:[]};
 let pianoLow=36,pianoHigh=96;
 let whiteKeys=[],keyXMap={},keyWMap={};
 
-// Virtualized rendering
 let notesByRow=[];
 let scoreCanvasOffsetY = 0;
 let lastScoreRenderRange = {first:-1, last:-1};
 let overlayCanvasOffsetY = 0;
 let scoreNeedsRedraw = true;
 
-// Active-notes event timeline
 let noteEvents = [];
 let eventPointer = 0;
 let activeNoteSet = new Set();
@@ -764,7 +762,7 @@ function computeVirtRange(){
 }
 
 // ═══════════════════════════════════════════════════════════
-// SCORE RENDER (virtualized)
+// SCORE RENDER
 // ═══════════════════════════════════════════════════════════
 function renderScore(){
   if(!midi || !layout.rows.length) return;
@@ -949,7 +947,7 @@ function drawLedger(ctx,m,hand,rowY,noteX,noteW){
 }
 
 // ═══════════════════════════════════════════════════════════
-// OVERLAY RENDER (virtualized, event-driven)
+// OVERLAY RENDER
 // ═══════════════════════════════════════════════════════════
 function renderOverlay(){
   if(!midi || !layout.rows.length) return;
@@ -1012,7 +1010,7 @@ function findOriginalNote(dn){
 }
 
 // ═══════════════════════════════════════════════════════════
-// CURSOR (CSS transform — cheap)
+// CURSOR
 // ═══════════════════════════════════════════════════════════
 function updateCursor(){
   if(!midi || !layout.measures.length) return;
@@ -1081,7 +1079,7 @@ document.getElementById('pianoCanvas').addEventListener('click',async e=>{
 });
 
 // ═══════════════════════════════════════════════════════════
-// PERF HUD (toggle with Shift+P)
+// PERF HUD
 // ═══════════════════════════════════════════════════════════
 let perfFrames=0, perfLastTime=performance.now(), perfFps=0;
 const perfHud = document.getElementById('perfHud');
@@ -1130,7 +1128,6 @@ function updateTimeDisplay(){
   document.getElementById('timeDisplay').textContent=`${f(currentTime)} / ${f(totalDuration)}  ♩${currentBpm}`;
 }
 
-// Full rebuild — for data changes (load, transpose, track changes)
 function fullRebuild(){
   buildLayout();
   buildDrawNotes();
@@ -1149,13 +1146,10 @@ function fullRebuild(){
   updateTimeDisplay();
 }
 
-// Geometry-only rebuild — for zoom/resize (skips note events & active-set work)
 function geometryRebuild(){
   buildLayout();
   buildDrawNotes();
   attachOrigRefs();
-  // Note events are time-based, not geometry-based → skip
-  // Active notes are unchanged → skip sync
   activeNotesSignature = '__force__';
   scoreNeedsRedraw = true;
   overlayNeedsRedraw = true;
@@ -1568,7 +1562,6 @@ document.getElementById('btnStop').addEventListener('click',()=>{stopPlayback();
 document.getElementById('speedSlider').addEventListener('input',e=>{playbackSpeed=+e.target.value;document.getElementById('speedVal').textContent=playbackSpeed.toFixed(2)+'×';if(isPlaying){Tone.Transport.cancel();scheduledIds=[];scheduleAudio();}});
 document.getElementById('speedSlider').addEventListener('change',blurToolbar);
 
-// Zoom slider — throttle rebuilds to rAF to avoid freezing during drag
 let zoomPendingValue = null;
 let zoomRafId = null;
 function applyZoomPending(){
