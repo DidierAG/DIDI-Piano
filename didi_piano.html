@@ -344,6 +344,16 @@ let overlayNeedsRedraw = true;
 // Piano key flash (for visual feedback on tap)
 let pianoFlashKeys = new Map(); // midi → endTime (ms)
 
+// Momentum scrolling (iPad flick inertia)
+let momentumVY = 0;              // pixels/ms
+let momentumRafId = null;
+let momentumLastTs = 0;
+const MOMENTUM_FRICTION = 0.95;  // per 16ms frame
+const MOMENTUM_MIN_VELOCITY = 0.02; // px/ms — stop below this
+
+// Auto-follow state for playback
+let autoFollowArmed = true;      // disarmed when user scrolls cursor off-screen during playback
+
 // ═══════════════════════════════════════════════════════════
 // TICK-BASED INFRASTRUCTURE
 // ═══════════════════════════════════════════════════════════
@@ -567,16 +577,99 @@ function updateScrollThumb(){
   thumb.style.height=thumbH+'px';thumb.style.top=thumbTop+'px';
 }
 
-// Auto-scroll cursor into view, keeping next row also visible if possible
-function scrollToCursor(){
-  const pos=tickToPos(timeToTicks(currentTime));if(!pos)return;
-  const viewH=getViewHeight();
-  const rH=rowHeight();
-  const rowTop=pos.rowY;
-  // We want both current row AND next row visible → aim to show rowTop + 2*rH
-  const rowBot=rowTop + 2*rH;
-  if(rowTop<scrollOffset+10) setScroll(Math.max(0,rowTop-10));
-  else if(rowBot>scrollOffset+viewH-10) setScroll(rowBot-viewH+10);
+// Stop any ongoing momentum scroll
+function stopMomentum(){
+  if(momentumRafId){ cancelAnimationFrame(momentumRafId); momentumRafId = null; }
+  momentumVY = 0;
+}
+
+// Start momentum scrolling with given initial velocity (px/ms)
+function startMomentum(vy){
+  stopMomentum();
+  if(Math.abs(vy) < MOMENTUM_MIN_VELOCITY) return;
+  momentumVY = vy;
+  momentumLastTs = performance.now();
+  const step = (ts)=>{
+    const dt = ts - momentumLastTs;
+    momentumLastTs = ts;
+    // Friction: scale per 16ms frame, adapted to actual dt
+    const frictionFactor = Math.pow(MOMENTUM_FRICTION, dt/16);
+    momentumVY *= frictionFactor;
+    const delta = momentumVY * dt;
+    const prev = scrollOffset;
+    setScroll(scrollOffset - delta);
+    // Stop if we hit an edge or velocity is negligible
+    if(scrollOffset === prev || Math.abs(momentumVY) < MOMENTUM_MIN_VELOCITY){
+      stopMomentum();
+      return;
+    }
+    momentumRafId = requestAnimationFrame(step);
+  };
+  momentumRafId = requestAnimationFrame(step);
+}
+
+// Check if cursor is currently visible on screen
+function isCursorVisible(){
+  const pos = tickToPos(timeToTicks(currentTime));
+  if(!pos) return false;
+  const viewH = getViewHeight();
+  const rowTop = pos.rowY;
+  const rowBot = pos.rowY + systemVisualHeight();
+  return rowBot > scrollOffset && rowTop < scrollOffset + viewH;
+}
+
+// Smart auto-follow during playback:
+// - Only acts if cursor is on the LAST fully-visible row.
+// - In that case, smoothly scrolls up in proportion to cursor's progress
+//   through that row, so by end of row the NEXT row is fully visible.
+function smartAutoFollow(){
+  if(!autoFollowArmed) return;
+  const pos = tickToPos(timeToTicks(currentTime));
+  if(!pos) return;
+
+  const viewH = getViewHeight();
+  const rH = rowHeight();
+  const rowTop = pos.rowY;
+  const rowBot = pos.rowY + systemVisualHeight();
+
+  // Is cursor's row the last FULLY-visible row?
+  // Last fully-visible row = largest row whose rowBot <= scrollOffset + viewH
+  // We check: is the NEXT row (rowTop + rH) NOT fully visible?
+  const nextRowBot = rowTop + rH + systemVisualHeight();
+  const isLastFullyVisible = (rowBot <= scrollOffset + viewH + 1) && (nextRowBot > scrollOffset + viewH + 1);
+
+  if(!isLastFullyVisible) return;
+
+  // Find cursor's horizontal progress within its row
+  const measPerRow = layout.measuresPerRow;
+  const row = layout.rows[Math.floor((rowTop - TITLE_HEIGHT) / rH)];
+  if(!row) return;
+  const firstM = layout.measures[row.mStart];
+  const lastM = layout.measures[row.mEnd - 1];
+  if(!firstM || !lastM) return;
+  const rowStartTick = firstM.startTick;
+  const rowEndTick = lastM.endTick;
+  const curTick = timeToTicks(currentTime);
+  const progress = Math.max(0, Math.min(1, (curTick - rowStartTick) / (rowEndTick - rowStartTick)));
+
+  // We want: at progress=0, scroll unchanged; at progress=1, next row fully visible.
+  // Target scroll at progress=1: nextRowBot - viewH
+  const startScroll = scrollOffset;  // current; but we need stable baseline — see note below
+  const targetScroll = nextRowBot - viewH;
+
+  // Use a stable reference: target scroll purely as a function of progress,
+  // derived from the cursor's row geometry (independent of current scroll).
+  const baseScroll = rowBot - viewH; // scroll position where cursor row is exactly at bottom edge
+  const desired = baseScroll + progress * rH;
+  if(desired > scrollOffset){
+    setScroll(desired);
+  }
+}
+
+// Detect if user has scrolled cursor off-screen during playback → disarm auto-follow
+function checkAutoFollowDisarm(){
+  if(!isPlaying || !autoFollowArmed) return;
+  if(!isCursorVisible()) autoFollowArmed = false;
 }
 
 let sbDragging=false,sbDragStartY=0,sbDragStartScroll=0;
@@ -589,12 +682,15 @@ function scrollbarPointerDown(e){
   else{const trackH=trackRect.height,thumbH=thumbRect.height;const ratio=Math.max(0,Math.min(1,(y-thumbH/2)/(trackH-thumbH)));setScroll(ratio*getMaxScroll());}
   e.preventDefault();
   e.stopPropagation();
+  stopMomentum();
+  checkAutoFollowDisarm();
 }
 function scrollbarPointerMove(e){
   if(!sbDragging)return;const dy=(e.clientY||e.touches?.[0]?.clientY)-sbDragStartY;
   const track=document.getElementById('scrollTrack'),thumb=document.getElementById('scrollThumb');
   const trackH=track.clientHeight,thumbH=thumb.clientHeight,pixelRange=trackH-thumbH;
   if(pixelRange<=0)return;setScroll(sbDragStartScroll+(dy/pixelRange)*getMaxScroll());e.preventDefault();
+  checkAutoFollowDisarm();
 }
 function scrollbarPointerUp(){sbDragging=false;document.getElementById('scrollThumb').classList.remove('active');}
 
@@ -606,7 +702,12 @@ document.addEventListener('touchmove',e=>{if(sbDragging)scrollbarPointerMove(e);
 document.addEventListener('mouseup',scrollbarPointerUp);
 document.addEventListener('touchend',scrollbarPointerUp);
 
-document.getElementById('scoreArea').addEventListener('wheel',e=>{e.preventDefault();setScroll(scrollOffset+e.deltaY);},{passive:false});
+document.getElementById('scoreArea').addEventListener('wheel',e=>{
+  e.preventDefault();
+  stopMomentum();
+  setScroll(scrollOffset+e.deltaY);
+  checkAutoFollowDisarm();
+},{passive:false});
 
 // ═══════════════════════════════════════════════════════════
 // LAYOUT
@@ -1265,7 +1366,7 @@ function animate(ts){
   if(pianoFlashKeys.size>0) drawPiano(false);
 
   updateTimeDisplay();
-  scrollToCursor();
+  smartAutoFollow();
   updatePerfHud();
   animId = requestAnimationFrame(animate);
 }
@@ -1335,6 +1436,13 @@ async function startPlayback(){
   if(!midi)return;
   await Tone.start();
   if(!synths.length)initSynths();
+  // Re-arm auto-follow each time we start playing
+  autoFollowArmed = true;
+  // If cursor is off-screen when user hits play, scroll so cursor's row is at top
+  if(!isCursorVisible()){
+    const pos = tickToPos(timeToTicks(currentTime));
+    if(pos) setScroll(pos.rowY - 10);
+  }
   scheduleAudio();
   isPlaying=true;
   lastFrameTime=null;
@@ -1710,11 +1818,14 @@ let gesture = null;
 
 function gestureStart(type, clientX, clientY){
   if(!midi) return;
+  stopMomentum(); // kill any ongoing inertia if user touches again
   gesture = {
     type,
     startTime: performance.now(),
     startX: clientX, startY: clientY,
     lastX: clientX, lastY: clientY,
+    lastMoveTs: performance.now(),
+    velocityY: 0,
     moved: false,
     startScroll: scrollOffset
   };
@@ -1729,27 +1840,31 @@ function gestureMove(clientX, clientY){
 
   if(!gesture.moved && dist > TAP_MAX_MOVEMENT){
     gesture.moved = true;
-    // On touch drag: pause playback so the user takes over scrolling
-    if(gesture.type === 'touch' && isPlaying){
-      pausePlayback();
-    }
     showSeekTooltip();
   }
 
   if(gesture.moved){
     const rect = scoreAreaEl.getBoundingClientRect();
+    const now = performance.now();
+    const dtMove = now - gesture.lastMoveTs;
+
     if(gesture.type === 'touch'){
-      // iPad: scroll the page by finger delta AND move cursor under finger
+      // iPad: scroll page by finger delta (playback keeps going freely)
       const deltaY = clientY - gesture.lastY;
       setScroll(scrollOffset - deltaY);
+      // Track velocity for momentum (px/ms)
+      if(dtMove > 0) gesture.velocityY = deltaY / dtMove;
+      // Cursor follows finger
       const t = posToTime(clientX - rect.left, clientY - rect.top);
       if(t !== null) seekTo(t, false);
+      // If playing and user scrolled cursor off-screen → disarm auto-follow
+      checkAutoFollowDisarm();
     } else {
-      // Desktop: cursor follows mouse (x AND y → snaps to right staff line),
-      // but page does NOT scroll. follow=false prevents auto-scroll.
+      // Desktop: cursor follows mouse X/Y, page does NOT scroll
       const t = posToTime(clientX - rect.left, clientY - rect.top);
       if(t !== null) seekTo(t, false);
     }
+    gesture.lastMoveTs = now;
   }
   gesture.lastX = clientX;
   gesture.lastY = clientY;
@@ -1762,17 +1877,17 @@ function gestureEnd(){
 
   if(wasTap){
     if(isPlaying){
-      // Playing → just stop. Cursor stays where it was.
       pausePlayback();
     } else {
-      // Not playing → seek to tap position, then start playing.
       const rect = scoreAreaEl.getBoundingClientRect();
       const t = posToTime(gesture.startX - rect.left, gesture.startY - rect.top);
       if(t !== null) seekTo(t, false);
       startPlayback();
     }
+  } else if(gesture.moved && gesture.type === 'touch'){
+    // iPad: kick off momentum scroll with last velocity
+    startMomentum(gesture.velocityY);
   }
-  // else: drag ended, cursor stays where it was last placed
 
   setCursorSeeking(false);
   hideSeekTooltip();
