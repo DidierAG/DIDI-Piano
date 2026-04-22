@@ -1686,21 +1686,27 @@ function printScore(){
 // ═══════════════════════════════════════════════════════════
 //
 // DESKTOP (mouse):
-//   - Click (<200ms, <8px) → play/pause toggle
-//   - Click & drag → seek cursor to position (follows mouse)
-//   - Wheel → scroll
+//   - Click (<150ms, <8px):
+//       • if NOT playing → seek to click position, then start playing
+//       • if playing    → stop (cursor stays put)
+//   - Click & drag → cursor follows mouse X/Y (snaps to staff line
+//     under the mouse). Page does NOT scroll — only wheel/scrollbar scroll.
 //
 // IPAD (touch):
-//   - Tap (<200ms, <8px) → play/pause toggle
-//   - 1-finger drag → score scrolls vertically AND cursor follows finger
-//     (touch pauses playback auto-scroll follow)
+//   - Tap (<150ms, <8px):
+//       • if NOT playing → seek to tap position, then start playing
+//       • if playing    → stop (cursor stays put)
+//   - 1-finger drag → page scrolls vertically AND cursor follows finger.
 //
 // ═══════════════════════════════════════════════════════════
+
+const TAP_MAX_DURATION_MS = 150;
 
 const seekOvl=document.getElementById('seekOverlay');
 const scoreAreaEl=document.getElementById('scoreArea');
 
-let gesture = null; // { type: 'mouse'|'touch', startTime, startX, startY, lastX, lastY, moved, startScroll, wasPlaying }
+let gesture = null;
+// { type, startTime, startX, startY, lastX, lastY, moved, startScroll }
 
 function gestureStart(type, clientX, clientY){
   if(!midi) return;
@@ -1710,11 +1716,8 @@ function gestureStart(type, clientX, clientY){
     startX: clientX, startY: clientY,
     lastX: clientX, lastY: clientY,
     moved: false,
-    startScroll: scrollOffset,
-    wasPlaying: isPlaying
+    startScroll: scrollOffset
   };
-  // On touch: stop playback auto-scroll immediately (but keep audio playing until we know it's a drag)
-  // We won't pause audio on touch-start — only on actual drag.
   setCursorSeeking(true);
 }
 
@@ -1726,7 +1729,7 @@ function gestureMove(clientX, clientY){
 
   if(!gesture.moved && dist > TAP_MAX_MOVEMENT){
     gesture.moved = true;
-    // On touch drag: pause playback so the user takes over
+    // On touch drag: pause playback so the user takes over scrolling
     if(gesture.type === 'touch' && isPlaying){
       pausePlayback();
     }
@@ -1734,19 +1737,18 @@ function gestureMove(clientX, clientY){
   }
 
   if(gesture.moved){
+    const rect = scoreAreaEl.getBoundingClientRect();
     if(gesture.type === 'touch'){
-      // 1-finger drag: scroll score by vertical finger delta (from previous frame)
+      // iPad: scroll the page by finger delta AND move cursor under finger
       const deltaY = clientY - gesture.lastY;
       setScroll(scrollOffset - deltaY);
-      // Cursor follows finger position (finger X,Y in score coords)
-      const rect = scoreAreaEl.getBoundingClientRect();
       const t = posToTime(clientX - rect.left, clientY - rect.top);
-      if(t !== null) seekTo(t, false); // no auto-follow while user is actively scrolling
+      if(t !== null) seekTo(t, false);
     } else {
-      // Mouse drag: cursor follows mouse, score stays put
-      const rect = scoreAreaEl.getBoundingClientRect();
+      // Desktop: cursor follows mouse (x AND y → snaps to right staff line),
+      // but page does NOT scroll. follow=false prevents auto-scroll.
       const t = posToTime(clientX - rect.left, clientY - rect.top);
-      if(t !== null) seekTo(t, true);
+      if(t !== null) seekTo(t, false);
     }
   }
   gesture.lastX = clientX;
@@ -1756,12 +1758,21 @@ function gestureMove(clientX, clientY){
 function gestureEnd(){
   if(!gesture) return;
   const duration = performance.now() - gesture.startTime;
+  const wasTap = !gesture.moved && duration < TAP_MAX_DURATION_MS;
 
-  if(!gesture.moved && duration < TAP_MAX_DURATION){
-    // Short tap → play/pause
-    togglePlay();
+  if(wasTap){
+    if(isPlaying){
+      // Playing → just stop. Cursor stays where it was.
+      pausePlayback();
+    } else {
+      // Not playing → seek to tap position, then start playing.
+      const rect = scoreAreaEl.getBoundingClientRect();
+      const t = posToTime(gesture.startX - rect.left, gesture.startY - rect.top);
+      if(t !== null) seekTo(t, false);
+      startPlayback();
+    }
   }
-  // else: drag ended, cursor stays where it is
+  // else: drag ended, cursor stays where it was last placed
 
   setCursorSeeking(false);
   hideSeekTooltip();
@@ -1775,8 +1786,9 @@ function gestureCancel(){
 }
 
 // ───── Mouse events (desktop) ─────
-seekOvl.addEventListener('mousedown', e => {
+seekOvl.addEventListener('mousedown', async e => {
   if(e.button !== 0) return;
+  await Tone.start();
   gestureStart('mouse', e.clientX, e.clientY);
   e.preventDefault();
 });
@@ -1791,7 +1803,6 @@ document.addEventListener('mouseup', e => {
 let activeTouchId = null;
 seekOvl.addEventListener('touchstart', async e => {
   if(e.touches.length !== 1) {
-    // Multi-touch: cancel the current single-finger gesture
     if(gesture){ gestureCancel(); activeTouchId=null; }
     return;
   }
@@ -1821,6 +1832,7 @@ seekOvl.addEventListener('touchend', e => {
 seekOvl.addEventListener('touchcancel', e => {
   if(gesture && gesture.type==='touch'){ gestureCancel(); activeTouchId=null; }
 });
+
 
 // ═══════════════════════════════════════════════════════════
 // TOOLBAR EVENTS
