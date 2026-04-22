@@ -13,7 +13,6 @@ body {
   font-family:'Segoe UI',sans-serif;
   height:100vh; display:flex; flex-direction:column;
   overflow:hidden; user-select:none;
-  /*padding-bottom:80px;*/
 }
 
 #toolbar {
@@ -59,12 +58,26 @@ body {
   overflow:hidden;
   position:relative; min-height:0;
 }
-#scoreInner { position:absolute; top:0; left:0; right:0; }
-#scoreCanvas { display:block; }
+/* VIRTUALIZED: canvases now sit fixed in viewport, translated via transform */
+#scoreCanvas {
+  display:block;
+  position:absolute;
+  top:0; left:0;
+  will-change: transform;
+}
+#overlayCanvas {
+  display:block;
+  position:absolute;
+  top:0; left:0;
+  pointer-events:none;
+  z-index:5;
+  will-change: transform;
+}
 #cursor {
   position:absolute; width:3px; background:#e94560; border-radius:2px;
   box-shadow:0 0 10px rgba(233,69,96,.8); pointer-events:none;
-  top:0; left:0; transition:none; z-index:10;
+  top:0; left:0; z-index:10;
+  will-change: transform;
 }
 
 #scrollTrack {
@@ -134,43 +147,37 @@ body {
   border:1px solid #533483; padding:3px 7px; border-radius:4px; font-size:12px;
 }
 
-#printContainer {
-  display:none;
+#perfHud {
+  position:fixed; bottom:4px; left:4px;
+  background:rgba(0,0,0,0.6); color:#4fc3f7;
+  font-family:monospace; font-size:11px;
+  padding:3px 6px; border-radius:3px; z-index:9999;
+  pointer-events:none; display:none;
 }
+#perfHud.show { display:block; }
+
+#printContainer { display:none; }
 
 @media print {
   body > *:not(#printContainer) { display:none !important; }
-  body {
-    background:white; padding:0; height:auto; overflow:visible;
-    display:block;
-  }
-  #printContainer {
-    display:block !important;
-  }
-  #printContainer canvas {
-    display:block;
-    page-break-after:always;
-  }
-  #printContainer canvas:last-child {
-    page-break-after:avoid;
-  }
+  body { background:white; padding:0; height:auto; overflow:visible; display:block; }
+  #printContainer { display:block !important; }
+  #printContainer canvas { display:block; page-break-after:always; }
+  #printContainer canvas:last-child { page-break-after:avoid; }
 }
 </style>
 </head>
 <body>
-
-
 
 <div id="pianoArea">
   <canvas id="pianoCanvas"></canvas>
 </div>
 
 <div id="scoreArea">
-  <div id="scoreInner">
-    <canvas id="scoreCanvas"></canvas>
-    <div id="seekOverlay"></div>
-    <div id="cursor"></div>
-  </div>
+  <canvas id="scoreCanvas"></canvas>
+  <canvas id="overlayCanvas"></canvas>
+  <div id="cursor"></div>
+  <div id="seekOverlay"></div>
   <div id="scrollTrack">
     <div id="scrollThumb"></div>
   </div>
@@ -184,7 +191,6 @@ body {
     <p style="margin-top:10px;font-size:11px;color:#999">Designed by Didier Agani, co-coded by an AI agent</p>
   </div>
 </div>
-
 
 <div id="toolbar">
   <div class="tg">
@@ -231,6 +237,7 @@ body {
   </div>
 </div>
 
+<div id="perfHud"></div>
 <div id="printContainer"></div>
 
 <script>
@@ -251,6 +258,10 @@ const TRACK_COLORS=[
 
 const L={CLEF_W:56,MARGIN_LEFT:24,MARGIN_RIGHT:24,LINE_GAP:11,NOTE_H:10,RADIUS:4,ROW_PAD_T:30,STAFF_GAP:54,ROW_GAP:60,ROW_PAD_B:26};
 const TITLE_HEIGHT=50;
+
+// Virtualization config
+const VIRT_BUFFER_ROWS = 2;
+const REDRAW_THRESHOLD_PX = 1;
 
 function staffHeight(){return 4*L.LINE_GAP;}
 function systemHeight(){return staffHeight()+L.STAFF_GAP+staffHeight();}
@@ -277,12 +288,19 @@ let layout={measuresPerRow:4,rows:[],totalHeight:0,measures:[]};
 let pianoLow=36,pianoHigh=96;
 let whiteKeys=[],keyXMap={},keyWMap={};
 
-// ═══════════════════════════════════════════════════════════
-// PERFORMANCE: Row-indexed notes + caching
-// ═══════════════════════════════════════════════════════════
-let notesByRow=[];           // notesByRow[rowIndex] = [drawNote, ...]
-let prevActiveKey='';        // track active note set to skip piano redraws
-let prevCursorRowIndex=-1;   // track which row cursor is on
+// Virtualized rendering
+let notesByRow=[];
+let scoreCanvasOffsetY = 0;
+let lastScoreRenderRange = {first:-1, last:-1};
+let overlayCanvasOffsetY = 0;
+let scoreNeedsRedraw = true;
+
+// Active-notes event timeline
+let noteEvents = [];
+let eventPointer = 0;
+let activeNoteSet = new Set();
+let activeNotesSignature = '';
+let overlayNeedsRedraw = true;
 
 // ═══════════════════════════════════════════════════════════
 // TICK-BASED INFRASTRUCTURE
@@ -307,35 +325,35 @@ function buildTempoMap(){
   }
 }
 
+function bsearchTempoByTick(tick){
+  let lo=0, hi=tempoMap.length-1, res=0;
+  while(lo<=hi){
+    const mid=(lo+hi)>>1;
+    if(tempoMap[mid].tick<=tick){ res=mid; lo=mid+1; } else hi=mid-1;
+  }
+  return res;
+}
+function bsearchTempoByTime(t){
+  let lo=0, hi=tempoMap.length-1, res=0;
+  while(lo<=hi){
+    const mid=(lo+hi)>>1;
+    if(tempoMap[mid].time<=t+0.0001){ res=mid; lo=mid+1; } else hi=mid-1;
+  }
+  return res;
+}
+
 function ticksToTime(tick){
-  let time=0, prevTick=0, bpm=120;
-  for(const tm of tempoMap){
-    if(tm.tick<=tick){ time=tm.time; prevTick=tm.tick; bpm=tm.bpm; }
-    else break;
-  }
-  return time+(tick-prevTick)*(60/(bpm*ppq));
+  const i=bsearchTempoByTick(tick);
+  const tm=tempoMap[i];
+  return tm.time+(tick-tm.tick)*(60/(tm.bpm*ppq));
 }
-
 function timeToTicks(t){
-  let tick=0, prevTime=0, bpm=120;
-  for(const tm of tempoMap){
-    if(tm.time<=t+0.0001){ tick=tm.tick; prevTime=tm.time; bpm=tm.bpm; }
-    else break;
-  }
-  return tick+(t-prevTime)*((bpm*ppq)/60);
+  const i=bsearchTempoByTime(t);
+  const tm=tempoMap[i];
+  return tm.tick+(t-tm.time)*((tm.bpm*ppq)/60);
 }
-
-function bpmAtTime(t){
-  let bpm=tempoMap[0].bpm;
-  for(const tm of tempoMap){ if(tm.time<=t+0.0001) bpm=tm.bpm; else break; }
-  return bpm;
-}
-
-function bpmAtTick(tk){
-  let bpm=tempoMap[0].bpm;
-  for(const tm of tempoMap){ if(tm.tick<=tk+1) bpm=tm.bpm; else break; }
-  return bpm;
-}
+function bpmAtTime(t){ return tempoMap[bsearchTempoByTime(t)].bpm; }
+function bpmAtTick(tk){ return tempoMap[bsearchTempoByTick(tk)].bpm; }
 
 function getTimeSig(){
   const ts=midi?.header?.timeSignatures;
@@ -378,6 +396,16 @@ function buildMeasureMap(){
   }
 }
 
+function findMeasureIndexByTick(tick){
+  if(tick<=0)return 0;
+  let lo=0, hi=measureMap.length-1, res=0;
+  while(lo<=hi){
+    const mid=(lo+hi)>>1;
+    if(measureMap[mid].startTick<=tick){ res=mid; lo=mid+1; } else hi=mid-1;
+  }
+  return res;
+}
+
 function getTrackColor(i){return TRACK_COLORS[i%TRACK_COLORS.length];}
 
 // ═══════════════════════════════════════════════════════════
@@ -385,9 +413,10 @@ function getTrackColor(i){return TRACK_COLORS[i%TRACK_COLORS.length];}
 // ═══════════════════════════════════════════════════════════
 const scoreCanvas=document.getElementById('scoreCanvas');
 const scoreCtx=scoreCanvas.getContext('2d');
+const overlayCanvas=document.getElementById('overlayCanvas');
+const overlayCtx=overlayCanvas.getContext('2d');
 const pianoCanvas=document.getElementById('pianoCanvas');
 const pianoCtx=pianoCanvas.getContext('2d');
-let overlayCanvas=null,overlayCtx=null;
 
 // ═══════════════════════════════════════════════════════════
 // HELPERS
@@ -442,12 +471,49 @@ function pillSplit(ctx,x,y,w,h,r,flatL,flatR){
 function clefPanelWidth(){return L.MARGIN_LEFT+L.CLEF_W;}
 
 // ═══════════════════════════════════════════════════════════
-// CUSTOM SCROLL
+// VIRTUALIZED SCROLL
 // ═══════════════════════════════════════════════════════════
 function getViewHeight(){return document.getElementById('scoreArea').clientHeight;}
 function getMaxScroll(){return Math.max(0,layout.totalHeight-getViewHeight());}
-function setScroll(val){scrollOffset=Math.max(0,Math.min(val,getMaxScroll()));applyScroll();}
-function applyScroll(){document.getElementById('scoreInner').style.transform=`translateY(${-scrollOffset}px)`;updateScrollThumb();}
+
+function setScroll(val){
+  const newOffset = Math.max(0,Math.min(val,getMaxScroll()));
+  if(newOffset === scrollOffset) return;
+  scrollOffset = newOffset;
+  applyScroll();
+}
+
+function applyScroll(){
+  const needsScoreRedraw = shouldRedrawScore();
+  if(needsScoreRedraw) {
+    scoreNeedsRedraw = true;
+    overlayNeedsRedraw = true;
+  } else {
+    scoreCanvas.style.transform = `translateY(${scoreCanvasOffsetY - scrollOffset}px)`;
+    overlayCanvas.style.transform = `translateY(${overlayCanvasOffsetY - scrollOffset}px)`;
+  }
+  updateScrollThumb();
+  if(needsScoreRedraw) {
+    renderScore();
+    renderOverlay();
+  }
+  updateCursor();
+}
+
+function shouldRedrawScore(){
+  if(scoreNeedsRedraw) return true;
+  const viewH = getViewHeight();
+  const canvasCssH = parseFloat(scoreCanvas.style.height) || 0;
+  const canvasTop = scoreCanvasOffsetY;
+  const canvasBot = scoreCanvasOffsetY + canvasCssH;
+  const viewTop = scrollOffset;
+  const viewBot = scrollOffset + viewH;
+  const margin = rowHeight();
+  if(viewTop < canvasTop + margin && canvasTop > 0) return true;
+  if(viewBot > canvasBot - margin && canvasBot < layout.totalHeight) return true;
+  return false;
+}
+
 function updateScrollThumb(){
   const track=document.getElementById('scrollTrack'),thumb=document.getElementById('scrollThumb');
   const viewH=getViewHeight(),totalH=layout.totalHeight||viewH;
@@ -493,7 +559,7 @@ document.addEventListener('touchend',scrollbarPointerUp);
 document.getElementById('scoreArea').addEventListener('wheel',e=>{e.preventDefault();setScroll(scrollOffset+e.deltaY);},{passive:false});
 
 // ═══════════════════════════════════════════════════════════
-// LAYOUT (TICK-BASED)
+// LAYOUT
 // ═══════════════════════════════════════════════════════════
 function buildLayout(){
   if(!midi)return;
@@ -533,6 +599,7 @@ function buildLayout(){
 function buildDrawNotes(){
   drawNotes=[];if(!layout.measures.length)return;
   const measPerRow=layout.measuresPerRow;
+
   for(const note of allNotes){
     if(note.hand==='none')continue;
     const noteEndTick=note.ticks+note.durationTicks;
@@ -540,8 +607,9 @@ function buildDrawNotes(){
     const endMi=findMeasureIndexByTick(Math.max(0,noteEndTick-1));
     const startRow=Math.floor(startMi/measPerRow);
     const endRow=Math.floor(endMi/measPerRow);
+
     if(startRow===endRow){
-      drawNotes.push({...note,drawTick:note.ticks,drawDurationTicks:note.durationTicks,isContinuation:false,isSplit:false,rowIndex:startRow});
+      drawNotes.push(makeDrawNote(note, note.ticks, note.durationTicks, false, false, startRow));
     } else {
       for(let r=startRow;r<=endRow;r++){
         const rowStartMi=r*measPerRow;
@@ -551,12 +619,34 @@ function buildDrawNotes(){
         const segStartTick=Math.max(note.ticks,rowStartTick);
         const segEndTick=Math.min(noteEndTick,rowEndTick);
         if(segEndTick-segStartTick<=0)continue;
-        drawNotes.push({...note,drawTick:segStartTick,drawDurationTicks:segEndTick-segStartTick,isContinuation:r>startRow,isSplit:r<endRow,rowIndex:r});
+        drawNotes.push(makeDrawNote(note, segStartTick, segEndTick-segStartTick, r>startRow, r<endRow, r));
       }
     }
   }
-  // Build row index for fast lookup
   buildNotesByRow();
+}
+
+function makeDrawNote(note, drawTick, drawDurationTicks, isContinuation, isSplit, rowIndex){
+  const dn = {
+    midi:note.midi, time:note.time, duration:note.duration,
+    ticks:note.ticks, durationTicks:note.durationTicks,
+    velocity:note.velocity, hand:note.hand, trackColorIdx:note.trackColorIdx,
+    drawTick, drawDurationTicks, isContinuation, isSplit, rowIndex
+  };
+  const mi=findMeasureIndexByTick(drawTick);
+  const m=layout.measures[mi];
+  if(m){
+    const fracStart=Math.max(0,(drawTick-m.startTick)/m.ticksPerMeasure);
+    const fracDur=drawDurationTicks/m.ticksPerMeasure;
+    dn.x = clefPanelWidth()+m.xInRow+fracStart*m.width;
+    dn.nW = Math.max(fracDur*m.width,4);
+    dn.rowY = m.rowY;
+    const dispMidi = dn.midi+transpose;
+    dn.cy = noteY(dispMidi, dn.hand, m.rowY);
+    dn.ny = dn.cy - L.NOTE_H/2;
+    dn.dispMidi = dispMidi;
+  }
+  return dn;
 }
 
 function buildNotesByRow(){
@@ -569,33 +659,53 @@ function buildNotesByRow(){
   }
 }
 
-function findMeasureIndexByTick(tick){
-  if(tick<=0)return 0;
-  for(let i=measureMap.length-1;i>=0;i--){
-    if(tick>=measureMap[i].startTick)return i;
+function buildNoteEvents(){
+  noteEvents=[];
+  for(let i=0;i<allNotes.length;i++){
+    const n=allNotes[i];
+    if(n.hand==='none')continue;
+    noteEvents.push({time:n.time, type:'on', note:n});
+    noteEvents.push({time:n.time+n.duration, type:'off', note:n});
   }
-  return 0;
+  noteEvents.sort((a,b)=>{
+    if(a.time!==b.time) return a.time-b.time;
+    if(a.type===b.type) return 0;
+    return a.type==='off' ? -1 : 1;
+  });
+  eventPointer=0;
+  activeNoteSet=new Set();
 }
 
-function getLayoutMeasure(mi){ return layout.measures[mi]||null; }
+function syncActiveNotes(){
+  let changed = false;
+  while(eventPointer < noteEvents.length && noteEvents[eventPointer].time <= currentTime){
+    const ev = noteEvents[eventPointer];
+    if(ev.type==='on'){
+      activeNoteSet.add(ev.note);
+    } else {
+      activeNoteSet.delete(ev.note);
+    }
+    eventPointer++;
+    changed = true;
+  }
+  while(eventPointer > 0 && noteEvents[eventPointer-1].time > currentTime){
+    eventPointer--;
+    const ev = noteEvents[eventPointer];
+    if(ev.type==='on'){
+      activeNoteSet.delete(ev.note);
+    } else {
+      activeNoteSet.add(ev.note);
+    }
+    changed = true;
+  }
+  return changed;
+}
 
 function tickToPos(tick){
   const mi=findMeasureIndexByTick(tick);
-  const m=getLayoutMeasure(mi);if(!m)return null;
+  const m=layout.measures[mi];if(!m)return null;
   const frac=Math.max(0,Math.min(1,(tick-m.startTick)/m.ticksPerMeasure));
   return{rowIndex:m.rowIndex, rowY:m.rowY, x:clefPanelWidth()+m.xInRow+frac*m.width};
-}
-
-function drawNoteXAndWidth(dn){
-  const mi=findMeasureIndexByTick(dn.drawTick);
-  const m=getLayoutMeasure(mi);if(!m)return null;
-  const fracStart=Math.max(0,(dn.drawTick-m.startTick)/m.ticksPerMeasure);
-  const fracDur=dn.drawDurationTicks/m.ticksPerMeasure;
-  return{
-    x:clefPanelWidth()+m.xInRow+fracStart*m.width,
-    nW:Math.max(fracDur*m.width,4),
-    rowY:m.rowY
-  };
 }
 
 function posToTime(cx,cy){
@@ -607,13 +717,13 @@ function posToTime(cx,cy){
       const xContent=cx-clefPanelWidth();
       if(xContent<0) return null;
       for(let mi=row.mStart;mi<row.mEnd;mi++){
-        const m=getLayoutMeasure(mi);if(!m)continue;
+        const m=layout.measures[mi];if(!m)continue;
         if(xContent>=m.xInRow&&xContent<m.xInRow+m.width){
           const frac=(xContent-m.xInRow)/m.width;
           return Math.max(0,Math.min(ticksToTime(m.startTick+frac*m.ticksPerMeasure),totalDuration));
         }
       }
-      const lastM=getLayoutMeasure(row.mEnd-1);
+      const lastM=layout.measures[row.mEnd-1];
       if(lastM) return Math.min(ticksToTime(lastM.endTick),totalDuration);
       return null;
     }
@@ -627,7 +737,7 @@ function posToTime(cx,cy){
     const xContent=cx-clefPanelWidth();
     if(xContent<0) return null;
     for(let mi=bestRow.mStart;mi<bestRow.mEnd;mi++){
-      const m=getLayoutMeasure(mi);if(!m)continue;
+      const m=layout.measures[mi];if(!m)continue;
       if(xContent>=m.xInRow&&xContent<m.xInRow+m.width){
         const frac=(xContent-m.xInRow)/m.width;
         return Math.max(0,Math.min(ticksToTime(m.startTick+frac*m.ticksPerMeasure),totalDuration));
@@ -637,67 +747,92 @@ function posToTime(cx,cy){
   return null;
 }
 
-// ═══════════════════════════════════════════════════════════
-// VISIBLE ROWS HELPER
-// ═══════════════════════════════════════════════════════════
-function getVisibleRowRange(){
-  const viewH=getViewHeight();
-  const top=scrollOffset;
-  const bottom=scrollOffset+viewH;
-  let first=-1, last=-1;
-  for(let ri=0;ri<layout.rows.length;ri++){
-    const row=layout.rows[ri];
-    const rowTop=row.y;
-    const rowBot=row.y+rowHeight();
-    if(rowBot>top && rowTop<bottom){
-      if(first===-1) first=ri;
-      last=ri;
-    }
-  }
-  return{first:Math.max(0,first), last:Math.max(0,last)};
+function computeVirtRange(){
+  const viewH = getViewHeight();
+  const rH = rowHeight();
+  const rowsVisible = Math.ceil(viewH / rH) + 1;
+  const buffer = VIRT_BUFFER_ROWS;
+  const firstVisibleRow = Math.max(0, Math.floor((scrollOffset - TITLE_HEIGHT) / rH));
+  const first = Math.max(0, firstVisibleRow - buffer);
+  const last = Math.min(layout.rows.length-1, firstVisibleRow + rowsVisible + buffer);
+
+  const offsetY = (first === 0) ? 0 : TITLE_HEIGHT + first * rH;
+  const canvasRows = last - first + 1;
+  const heightCss = (first === 0 ? TITLE_HEIGHT : 0) + canvasRows * rH + 20;
+
+  return {first, last, offsetY, heightCss};
 }
 
 // ═══════════════════════════════════════════════════════════
-// DRAW SCORE
+// SCORE RENDER (virtualized)
 // ═══════════════════════════════════════════════════════════
-function buildScoreCanvas(){
-  if(!midi)return;
-  const scoreAreaW=document.getElementById('scoreArea').clientWidth;
-  const dpr=window.devicePixelRatio||1,H=layout.totalHeight,W=scoreAreaW;
-  const inner=document.getElementById('scoreInner');
-  inner.style.width=W+'px';inner.style.height=H+'px';
-  scoreCanvas.width=W*dpr;scoreCanvas.height=H*dpr;
-  scoreCanvas.style.width=W+'px';scoreCanvas.style.height=H+'px';
-  scoreCtx.setTransform(dpr,0,0,dpr,0,0);
-  document.getElementById('cursor').style.height=systemVisualHeight()+'px';
-  const ctx=scoreCtx;ctx.clearRect(0,0,W,H);ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);
+function renderScore(){
+  if(!midi || !layout.rows.length) return;
 
-  if(songDisplayName){
-    ctx.fillStyle='#222';ctx.font='bold 20px "Segoe UI", sans-serif';
-    ctx.textAlign='center';ctx.textBaseline='middle';
-    ctx.fillText(songDisplayName,W/2,TITLE_HEIGHT/2+2);ctx.textAlign='left';
+  const W = document.getElementById('scoreArea').clientWidth;
+  const {first, last, offsetY, heightCss} = computeVirtRange();
+
+  const dpr = window.devicePixelRatio || 1;
+  scoreCanvas.width = W * dpr;
+  scoreCanvas.height = heightCss * dpr;
+  scoreCanvas.style.width = W + 'px';
+  scoreCanvas.style.height = heightCss + 'px';
+  scoreCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  scoreCtx.clearRect(0, 0, W, heightCss);
+  scoreCtx.fillStyle = '#fff';
+  scoreCtx.fillRect(0, 0, W, heightCss);
+
+  if(first === 0 && songDisplayName){
+    scoreCtx.fillStyle='#222';
+    scoreCtx.font='bold 20px "Segoe UI", sans-serif';
+    scoreCtx.textAlign='center';
+    scoreCtx.textBaseline='middle';
+    scoreCtx.fillText(songDisplayName, W/2, TITLE_HEIGHT/2+2);
+    scoreCtx.textAlign='left';
   }
 
-  const acc=keySigAcc();
-  for(const row of layout.rows) drawRow(ctx,row,W,acc);
-  // Draw all notes on static canvas (all rows)
-  for(let ri=0;ri<notesByRow.length;ri++){
-    const notes=notesByRow[ri];
+  const acc = keySigAcc();
+  scoreCtx.save();
+  scoreCtx.translate(0, -offsetY);
+
+  for(let ri=first; ri<=last; ri++){
+    const row = layout.rows[ri];
+    drawRow(scoreCtx, row, W, acc);
+  }
+
+  for(let ri=first; ri<=last; ri++){
+    const notes = notesByRow[ri];
     for(const dn of notes){
-      if(dn.hand==='none')continue;
-      const pos=drawNoteXAndWidth(dn);if(!pos)continue;
-      const{x,nW,rowY}=pos;
-      const dispMidi=dn.midi+transpose;
-      const cy=noteY(dispMidi,dn.hand,rowY),ny=cy-L.NOTE_H/2;
-      const cl=getTrackColor(dn.trackColorIdx||0);
-      drawLedger(ctx,dispMidi,dn.hand,rowY,x,nW);
-      pillSplit(ctx,x,ny,nW,L.NOTE_H,L.RADIUS,dn.isContinuation,dn.isSplit);ctx.fillStyle=cl.bar;ctx.fill();
-      pillSplit(ctx,x,ny,nW,L.NOTE_H,L.RADIUS,dn.isContinuation,dn.isSplit);ctx.strokeStyle=cl.barStroke;ctx.lineWidth=0.7;ctx.stroke();
-      if(dn.isContinuation){ctx.fillStyle=cl.barStroke;ctx.font='bold 8px sans-serif';ctx.textAlign='left';ctx.textBaseline='middle';ctx.fillText('~',x+1,cy+0.5);}
-      if(!dn.isContinuation||nW>20)drawNoteLabel(ctx,dn,dispMidi,x+(dn.isContinuation?8:0),nW-(dn.isContinuation?8:0),cy,cl.text,cl.label);
+      drawBaseNote(scoreCtx, dn);
     }
   }
-  ctx.textAlign='left';
+
+  scoreCtx.restore();
+
+  scoreCanvasOffsetY = offsetY;
+  scoreCanvas.style.transform = `translateY(${offsetY - scrollOffset}px)`;
+  lastScoreRenderRange = {first, last};
+  scoreNeedsRedraw = false;
+
+  renderOverlay();
+}
+
+function drawBaseNote(ctx, dn){
+  if(dn.hand==='none' || dn.x == null) return;
+  const cl = getTrackColor(dn.trackColorIdx||0);
+  drawLedger(ctx, dn.dispMidi, dn.hand, dn.rowY, dn.x, dn.nW);
+  pillSplit(ctx, dn.x, dn.ny, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
+  ctx.fillStyle = cl.bar; ctx.fill();
+  pillSplit(ctx, dn.x, dn.ny, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
+  ctx.strokeStyle = cl.barStroke; ctx.lineWidth = 0.7; ctx.stroke();
+  if(dn.isContinuation){
+    ctx.fillStyle = cl.barStroke; ctx.font='bold 8px sans-serif';
+    ctx.textAlign='left'; ctx.textBaseline='middle';
+    ctx.fillText('~', dn.x+1, dn.cy+0.5);
+  }
+  if(!dn.isContinuation || dn.nW>20)
+    drawNoteLabel(ctx, dn, dn.dispMidi, dn.x+(dn.isContinuation?8:0), dn.nW-(dn.isContinuation?8:0), dn.cy, cl.text, cl.label);
 }
 
 function drawRow(ctx,row,W,acc){
@@ -751,10 +886,10 @@ function drawRow(ctx,row,W,acc){
   ctx.textAlign='left';
 
   let prevBpm=null;
-  if(mStart>0){ const prevM=getLayoutMeasure(mStart-1); if(prevM) prevBpm=prevM.bpm; }
+  if(mStart>0){ const prevM=layout.measures[mStart-1]; if(prevM) prevBpm=prevM.bpm; }
 
   for(let mi=mStart;mi<mEnd;mi++){
-    const m=getLayoutMeasure(mi);if(!m)continue;
+    const m=layout.measures[mi];if(!m)continue;
     const x=cpW+m.xInRow;
     if(x>contentRight+1)break;
 
@@ -780,7 +915,7 @@ function drawRow(ctx,row,W,acc){
     }
   }
 
-  const lastM=getLayoutMeasure(mEnd-1);
+  const lastM=layout.measures[mEnd-1];
   if(lastM){
     const xEnd=cpW+lastM.xInRow+lastM.width;
     const isFinal=(mEnd-1)>=measureMap.length-1;
@@ -814,84 +949,83 @@ function drawLedger(ctx,m,hand,rowY,noteX,noteW){
 }
 
 // ═══════════════════════════════════════════════════════════
-// OVERLAY (OPTIMIZED — visible rows only)
+// OVERLAY RENDER (virtualized, event-driven)
 // ═══════════════════════════════════════════════════════════
-function ensureOverlay(){
-  if(overlayCanvas)return;overlayCanvas=document.createElement('canvas');
-  overlayCanvas.style.position='absolute';overlayCanvas.style.top='0';overlayCanvas.style.left='0';
-  overlayCanvas.style.pointerEvents='none';overlayCanvas.style.zIndex='5';
-  document.getElementById('scoreInner').appendChild(overlayCanvas);overlayCtx=overlayCanvas.getContext('2d');
-}
-function resizeOverlay(){
-  if(!overlayCanvas||!overlayCtx)return;const dpr=window.devicePixelRatio||1;
-  const W=document.getElementById('scoreArea').clientWidth,H=layout.totalHeight||400;
-  overlayCanvas.width=W*dpr;overlayCanvas.height=H*dpr;
-  overlayCanvas.style.width=W+'px';overlayCanvas.style.height=H+'px';overlayCtx.setTransform(dpr,0,0,dpr,0,0);
-}
+function renderOverlay(){
+  if(!midi || !layout.rows.length) return;
+  const W = document.getElementById('scoreArea').clientWidth;
+  const {first, last, offsetY, heightCss} = computeVirtRange();
 
-function updateCursorAndOverlay(){
-  if(!midi||!layout.measures.length)return;
-  const curTick=timeToTicks(currentTime);
-  const pos=tickToPos(curTick);
-  if(pos){
-    const c=document.getElementById('cursor');
-    c.style.left=pos.x+'px';c.style.top=pos.rowY+'px';
-    c.style.height=systemVisualHeight()+'px';
-  }
-  if(!overlayCtx)return;
-
-  const W=document.getElementById('scoreArea').clientWidth;
-  const rH=rowHeight();
-
-  // Determine which rows need overlay updates:
-  // visible rows + 1 row margin on each side (for notes transitioning)
-  const{first,last}=getVisibleRowRange();
-  const drawFirst=Math.max(0,first-1);
-  const drawLast=Math.min(layout.rows.length-1,last+1);
-
-  // Clear only the rows we're going to redraw
-  for(let ri=drawFirst;ri<=drawLast;ri++){
-    const row=layout.rows[ri];
-    overlayCtx.clearRect(0,row.y,W,rH);
+  const dpr = window.devicePixelRatio || 1;
+  const needResize = overlayCanvas.width !== Math.round(W*dpr) || overlayCanvas.height !== Math.round(heightCss*dpr);
+  if(needResize){
+    overlayCanvas.width = W * dpr;
+    overlayCanvas.height = heightCss * dpr;
+    overlayCanvas.style.width = W + 'px';
+    overlayCanvas.style.height = heightCss + 'px';
+    overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  } else {
+    overlayCtx.clearRect(0,0,W,heightCss);
   }
 
-  // Draw overlay only for visible rows
-  for(let ri=drawFirst;ri<=drawLast;ri++){
-    const notes=notesByRow[ri];
-    if(!notes)continue;
+  overlayCanvasOffsetY = offsetY;
+  overlayCanvas.style.transform = `translateY(${offsetY - scrollOffset}px)`;
+
+  overlayCtx.save();
+  overlayCtx.translate(0, -offsetY);
+
+  for(let ri=first; ri<=last; ri++){
+    const notes = notesByRow[ri];
     for(const dn of notes){
-      if(dn.hand==='none')continue;
-      const isActive=currentTime>=dn.time&&currentTime<dn.time+dn.duration;
-      const isPast=currentTime>=dn.time+dn.duration;
-      if(!isActive&&!isPast)continue;
-
-      const p=drawNoteXAndWidth(dn);if(!p)continue;
-      const{x,nW,rowY}=p;
-      const dispMidi=dn.midi+transpose;
-      const cy=noteY(dispMidi,dn.hand,rowY),ny=cy-L.NOTE_H/2;
-      const cl=getTrackColor(dn.trackColorIdx||0);
+      if(dn.hand==='none' || dn.x==null) continue;
+      const isActive = activeNoteSet.has(findOriginalNote(dn));
+      const isPast = (currentTime >= dn.time + dn.duration);
+      if(!isActive && !isPast) continue;
+      const cl = getTrackColor(dn.trackColorIdx||0);
 
       if(isPast){
-        pillSplit(overlayCtx,x,ny,nW,L.NOTE_H,L.RADIUS,dn.isContinuation,dn.isSplit);
-        overlayCtx.fillStyle=cl.past;overlayCtx.fill();
+        pillSplit(overlayCtx, dn.x, dn.ny, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
+        overlayCtx.fillStyle = cl.past; overlayCtx.fill();
       }
       if(isActive){
-        pillSplit(overlayCtx,x,ny,nW,L.NOTE_H,L.RADIUS,dn.isContinuation,dn.isSplit);
-        overlayCtx.fillStyle=cl.active;overlayCtx.fill();
-        pillSplit(overlayCtx,x,ny,nW,L.NOTE_H,L.RADIUS,dn.isContinuation,dn.isSplit);
-        overlayCtx.strokeStyle=cl.activeBorder;overlayCtx.lineWidth=1.5;overlayCtx.stroke();
-        overlayCtx.save();overlayCtx.shadowColor=cl.active;overlayCtx.shadowBlur=12;
-        pillSplit(overlayCtx,x,ny,nW,L.NOTE_H,L.RADIUS,dn.isContinuation,dn.isSplit);
-        overlayCtx.fillStyle=cl.active;overlayCtx.fill();overlayCtx.restore();
-        if(!dn.isContinuation||nW>20)
-          drawNoteLabel(overlayCtx,dn,dispMidi,x+(dn.isContinuation?8:0),nW-(dn.isContinuation?8:0),cy,cl.activeText,cl.activeText);
+        pillSplit(overlayCtx, dn.x, dn.ny, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
+        overlayCtx.fillStyle = cl.active; overlayCtx.fill();
+        pillSplit(overlayCtx, dn.x, dn.ny, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
+        overlayCtx.strokeStyle = cl.activeBorder; overlayCtx.lineWidth = 1.5; overlayCtx.stroke();
+        overlayCtx.save();
+        overlayCtx.shadowColor = cl.active; overlayCtx.shadowBlur = 12;
+        pillSplit(overlayCtx, dn.x, dn.ny, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
+        overlayCtx.fillStyle = cl.active; overlayCtx.fill();
+        overlayCtx.restore();
+        if(!dn.isContinuation || dn.nW>20)
+          drawNoteLabel(overlayCtx, dn, dn.dispMidi, dn.x+(dn.isContinuation?8:0), dn.nW-(dn.isContinuation?8:0), dn.cy, cl.activeText, cl.activeText);
       }
     }
   }
+
+  overlayCtx.restore();
+  overlayNeedsRedraw = false;
+}
+
+function findOriginalNote(dn){
+  return dn._orig;
 }
 
 // ═══════════════════════════════════════════════════════════
-// PIANO (OPTIMIZED — skip if unchanged)
+// CURSOR (CSS transform — cheap)
+// ═══════════════════════════════════════════════════════════
+function updateCursor(){
+  if(!midi || !layout.measures.length) return;
+  const curTick = timeToTicks(currentTime);
+  const pos = tickToPos(curTick);
+  if(!pos) return;
+  const c = document.getElementById('cursor');
+  c.style.transform = `translate(${pos.x}px, ${pos.rowY - scrollOffset}px)`;
+  c.style.height = systemVisualHeight() + 'px';
+}
+
+// ═══════════════════════════════════════════════════════════
+// PIANO
 // ═══════════════════════════════════════════════════════════
 function updatePianoRange(){
   if(!allNotes.length){pianoLow=36;pianoHigh=96;return;}
@@ -911,33 +1045,29 @@ function buildPianoLayout(){
     else{const rx=keyXMap[m+1];if(rx!==undefined){keyXMap[m]=rx-wkW*0.32;keyWMap[m]=wkW*0.6;}}}
 }
 
-function getActiveNoteKey(){
-  // Build a lightweight key string of currently active notes for change detection
-  let key='';
-  for(const n of allNotes){
-    if(currentTime>=n.time&&currentTime<n.time+n.duration&&n.hand!=='none'){
-      key+=n.midi+',';
-    }
-  }
-  return key;
+function computeActiveNotesSignature(){
+  if(activeNoteSet.size===0) return '';
+  const arr=[];
+  for(const n of activeNoteSet) arr.push(n.midi);
+  arr.sort((a,b)=>a-b);
+  return arr.join(',');
 }
 
 function drawPiano(force){
-  // Skip redraw if active notes haven't changed
-  const activeKey=getActiveNoteKey();
-  if(!force&&activeKey===prevActiveKey)return;
-  prevActiveKey=activeKey;
+  const sig = computeActiveNotesSignature();
+  if(!force && sig === activeNotesSignature) return;
+  activeNotesSignature = sig;
 
   const el=document.getElementById('pianoArea'),W=el.clientWidth,H=el.clientHeight;
   pianoCtx.clearRect(0,0,W,H);pianoCtx.fillStyle='#111';pianoCtx.fillRect(0,0,W,H);buildPianoLayout();
-  const activeNotes=new Map();
-  for(const n of allNotes){if(currentTime>=n.time&&currentTime<n.time+n.duration&&n.hand!=='none')activeNotes.set(n.midi+transpose,n.trackColorIdx||0);}
+  const activeByMidi=new Map();
+  for(const n of activeNoteSet){ activeByMidi.set(n.midi+transpose, n.trackColorIdx||0); }
   const bkH=H*0.62;
-  for(const m of whiteKeys){const x=keyXMap[m],kW=keyWMap[m];const tci=activeNotes.get(m);const isA=tci!==undefined;
+  for(const m of whiteKeys){const x=keyXMap[m],kW=keyWMap[m];const tci=activeByMidi.get(m);const isA=tci!==undefined;
     pianoCtx.fillStyle=isA?getTrackColor(tci).active:'#f5f5f5';pianoCtx.fillRect(x,0,kW-1,H);
     pianoCtx.strokeStyle='#888';pianoCtx.lineWidth=0.5;pianoCtx.strokeRect(x,0,kW-1,H);
     if(m%12===0){pianoCtx.fillStyle='#666';pianoCtx.font='bold 9px sans-serif';pianoCtx.textAlign='center';pianoCtx.textBaseline='bottom';pianoCtx.fillText(noteLabel(m),x+kW/2,H-2);}}
-  for(let m=pianoLow;m<=pianoHigh;m++){if(!isBlack(m)||keyXMap[m]===undefined)continue;const x=keyXMap[m],kW=keyWMap[m];const tci=activeNotes.get(m);const isA=tci!==undefined;
+  for(let m=pianoLow;m<=pianoHigh;m++){if(!isBlack(m)||keyXMap[m]===undefined)continue;const x=keyXMap[m],kW=keyWMap[m];const tci=activeByMidi.get(m);const isA=tci!==undefined;
     pianoCtx.fillStyle=isA?getTrackColor(tci).active:'#222';pianoCtx.fillRect(x,0,kW,bkH);pianoCtx.strokeStyle='#000';pianoCtx.lineWidth=0.5;pianoCtx.strokeRect(x,0,kW,bkH);}
   pianoCtx.textAlign='left';
 }
@@ -951,19 +1081,47 @@ document.getElementById('pianoCanvas').addEventListener('click',async e=>{
 });
 
 // ═══════════════════════════════════════════════════════════
-// RENDER
+// PERF HUD (toggle with Shift+P)
 // ═══════════════════════════════════════════════════════════
-function render(force){drawPiano(force);updateCursorAndOverlay();updateTimeDisplay();}
+let perfFrames=0, perfLastTime=performance.now(), perfFps=0;
+const perfHud = document.getElementById('perfHud');
+function updatePerfHud(){
+  perfFrames++;
+  const now = performance.now();
+  if(now - perfLastTime >= 500){
+    perfFps = Math.round(perfFrames * 1000 / (now - perfLastTime));
+    perfFrames = 0;
+    perfLastTime = now;
+    if(perfHud.classList.contains('show')){
+      perfHud.textContent = `${perfFps} fps · notes:${allNotes.length} draw:${drawNotes.length} active:${activeNoteSet.size}`;
+    }
+  }
+}
 
+// ═══════════════════════════════════════════════════════════
+// RAF LOOP
+// ═══════════════════════════════════════════════════════════
 function animate(ts){
-  if(!isPlaying)return;
-  if(lastFrameTime===null)lastFrameTime=ts;
-  currentTime+=((ts-lastFrameTime)/1000)*playbackSpeed;
-  lastFrameTime=ts;
-  if(currentTime>=totalDuration+1){stopPlayback();return;}
-  render();
+  if(!isPlaying) return;
+  if(lastFrameTime === null) lastFrameTime = ts;
+  const dt = (ts - lastFrameTime) / 1000;
+  lastFrameTime = ts;
+  currentTime += dt * playbackSpeed;
+  if(currentTime >= totalDuration + 1){ stopPlayback(); return; }
+
+  const setChanged = syncActiveNotes();
+
+  updateCursor();
+
+  if(setChanged){
+    renderOverlay();
+    drawPiano(false);
+  }
+
+  updateTimeDisplay();
   scrollToCursor();
-  animId=requestAnimationFrame(animate);
+  updatePerfHud();
+  animId = requestAnimationFrame(animate);
 }
 
 function updateTimeDisplay(){
@@ -972,11 +1130,51 @@ function updateTimeDisplay(){
   document.getElementById('timeDisplay').textContent=`${f(currentTime)} / ${f(totalDuration)}  ♩${currentBpm}`;
 }
 
+// Full rebuild — for data changes (load, transpose, track changes)
 function fullRebuild(){
-  buildLayout();buildDrawNotes();ensureOverlay();resizeOverlay();
-  buildScoreCanvas();setScroll(scrollOffset);
-  prevActiveKey='';prevCursorRowIndex=-1;
-  render(true);
+  buildLayout();
+  buildDrawNotes();
+  attachOrigRefs();
+  buildNoteEvents();
+  eventPointer = 0;
+  activeNoteSet = new Set();
+  syncActiveNotes();
+  activeNotesSignature = '__force__';
+  scoreNeedsRedraw = true;
+  overlayNeedsRedraw = true;
+  setScroll(scrollOffset);
+  renderScore();
+  drawPiano(true);
+  updateCursor();
+  updateTimeDisplay();
+}
+
+// Geometry-only rebuild — for zoom/resize (skips note events & active-set work)
+function geometryRebuild(){
+  buildLayout();
+  buildDrawNotes();
+  attachOrigRefs();
+  // Note events are time-based, not geometry-based → skip
+  // Active notes are unchanged → skip sync
+  activeNotesSignature = '__force__';
+  scoreNeedsRedraw = true;
+  overlayNeedsRedraw = true;
+  setScroll(scrollOffset);
+  renderScore();
+  updateCursor();
+}
+
+function attachOrigRefs(){
+  for(let i=0;i<allNotes.length;i++) allNotes[i]._idx = i;
+  const byKey = new Map();
+  for(const n of allNotes){
+    const key = `${n.midi}|${n.ticks}|${n.trackColorIdx}`;
+    byKey.set(key, n);
+  }
+  for(const dn of drawNotes){
+    const key = `${dn.midi}|${dn.ticks}|${dn.trackColorIdx}`;
+    dn._orig = byKey.get(key) || null;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -991,7 +1189,17 @@ function initSynths(){
 }
 function initMetro(){if(metroSynth)return;metroSynth=new Tone.NoiseSynth({noise:{type:'white'},envelope:{attack:.001,decay:.04,sustain:0,release:.01}}).toDestination();metroSynth.volume.value=-10;}
 
-async function startPlayback(){if(!midi)return;await Tone.start();if(!synths.length)initSynths();scheduleAudio();isPlaying=true;lastFrameTime=null;document.getElementById('btnPlay').textContent='⏸ Pause';document.getElementById('btnPlay').classList.add('active');animId=requestAnimationFrame(animate);}
+async function startPlayback(){
+  if(!midi)return;
+  await Tone.start();
+  if(!synths.length)initSynths();
+  scheduleAudio();
+  isPlaying=true;
+  lastFrameTime=null;
+  document.getElementById('btnPlay').textContent='⏸ Pause';
+  document.getElementById('btnPlay').classList.add('active');
+  animId=requestAnimationFrame(animate);
+}
 
 function scheduleAudio(){
   Tone.Transport.cancel();Tone.Transport.stop();scheduledIds=[];
@@ -1022,10 +1230,36 @@ function scheduleAudio(){
   Tone.Transport.start();
 }
 
-function pausePlayback(){isPlaying=false;Tone.Transport.pause();document.getElementById('btnPlay').textContent='▶ Play';document.getElementById('btnPlay').classList.remove('active');if(animId)cancelAnimationFrame(animId);}
-function stopPlayback(){isPlaying=false;currentTime=0;Tone.Transport.stop();Tone.Transport.cancel();scheduledIds=[];document.getElementById('btnPlay').textContent='▶ Play';document.getElementById('btnPlay').classList.remove('active');if(animId)cancelAnimationFrame(animId);prevActiveKey='';render(true);}
+function pausePlayback(){
+  isPlaying=false;Tone.Transport.pause();
+  document.getElementById('btnPlay').textContent='▶ Play';
+  document.getElementById('btnPlay').classList.remove('active');
+  if(animId)cancelAnimationFrame(animId);
+}
+function stopPlayback(){
+  isPlaying=false;currentTime=0;Tone.Transport.stop();Tone.Transport.cancel();scheduledIds=[];
+  document.getElementById('btnPlay').textContent='▶ Play';
+  document.getElementById('btnPlay').classList.remove('active');
+  if(animId)cancelAnimationFrame(animId);
+  eventPointer=0; activeNoteSet=new Set();
+  syncActiveNotes();
+  activeNotesSignature = '__force__';
+  renderOverlay();
+  drawPiano(true);
+  updateCursor();
+  updateTimeDisplay();
+}
 function togglePlay(){isPlaying?pausePlayback():startPlayback();}
-function seekTo(t,follow){currentTime=Math.max(0,Math.min(t,totalDuration));if(isPlaying){Tone.Transport.cancel();scheduledIds=[];scheduleAudio();}else{prevActiveKey='';render(true);}if(follow)scrollToCursor();}
+function seekTo(t, follow){
+  currentTime = Math.max(0, Math.min(t, totalDuration));
+  syncActiveNotes();
+  if(isPlaying){ Tone.Transport.cancel(); scheduledIds=[]; scheduleAudio(); }
+  updateCursor();
+  renderOverlay();
+  drawPiano(false);
+  updateTimeDisplay();
+  if(follow) scrollToCursor();
+}
 
 // ═══════════════════════════════════════════════════════════
 // TRANSPOSE
@@ -1111,7 +1345,7 @@ function showTracks(){
 function applyTracks(){document.querySelectorAll('#trackList select').forEach(s=>{trackConfig[+s.dataset.i].hand=s.value;trackConfig[+s.dataset.i].muted=s.value==='none';});parseNotes();updatePianoRange();buildTrackChips();fullRebuild();document.getElementById('trackModal').style.display='none';if(isPlaying){Tone.Transport.cancel();scheduledIds=[];scheduleAudio();}}
 
 // ═══════════════════════════════════════════════════════════
-// PRINT (TICK-BASED)
+// PRINT
 // ═══════════════════════════════════════════════════════════
 function printScore(){
   if(!midi)return alert('Load a MIDI file first.');
@@ -1163,7 +1397,6 @@ function printScore(){
     }
   }
 
-  // Index print notes by row for fast access
   const printNotesByRow=[];
   for(let i=0;i<printRows.length;i++) printNotesByRow.push([]);
   for(const dn of printDrawNotes){
@@ -1271,7 +1504,6 @@ function printScore(){
         else{ctx.strokeStyle='#444';ctx.lineWidth=1.0;ctx.beginPath();ctx.moveTo(xEnd,tT);ctx.lineTo(xEnd,sysBot);ctx.stroke();}
       }
 
-      // Draw notes for this row using indexed array
       for(const dn of printNotesByRow[ri]){
         if(dn.hand==='none')continue;
         let noteMeas=null;
@@ -1335,8 +1567,31 @@ document.getElementById('btnPlay').addEventListener('click',()=>{togglePlay();bl
 document.getElementById('btnStop').addEventListener('click',()=>{stopPlayback();blurToolbar();});
 document.getElementById('speedSlider').addEventListener('input',e=>{playbackSpeed=+e.target.value;document.getElementById('speedVal').textContent=playbackSpeed.toFixed(2)+'×';if(isPlaying){Tone.Transport.cancel();scheduledIds=[];scheduleAudio();}});
 document.getElementById('speedSlider').addEventListener('change',blurToolbar);
-document.getElementById('zoomSlider').addEventListener('input',e=>{pxPerBeat=+e.target.value;document.getElementById('zoomVal').textContent=pxPerBeat+' px/b';if(midi)fullRebuild();});
-document.getElementById('zoomSlider').addEventListener('change',blurToolbar);
+
+// Zoom slider — throttle rebuilds to rAF to avoid freezing during drag
+let zoomPendingValue = null;
+let zoomRafId = null;
+function applyZoomPending(){
+  zoomRafId = null;
+  if(zoomPendingValue === null) return;
+  pxPerBeat = zoomPendingValue;
+  zoomPendingValue = null;
+  if(midi) geometryRebuild();
+}
+document.getElementById('zoomSlider').addEventListener('input', e=>{
+  const v = +e.target.value;
+  document.getElementById('zoomVal').textContent = v + ' px/b';
+  zoomPendingValue = v;
+  if(zoomRafId === null) zoomRafId = requestAnimationFrame(applyZoomPending);
+});
+document.getElementById('zoomSlider').addEventListener('change', ()=>{
+  if(zoomPendingValue !== null){
+    if(zoomRafId) cancelAnimationFrame(zoomRafId);
+    applyZoomPending();
+  }
+  blurToolbar();
+});
+
 document.getElementById('metroCheck').addEventListener('change',e=>{metronomeOn=e.target.checked;if(isPlaying){Tone.Transport.cancel();scheduledIds=[];scheduleAudio();}blurToolbar();});
 document.getElementById('btnTracks').addEventListener('click',()=>{showTracks();blurToolbar();});
 document.getElementById('btnPrint').addEventListener('click',()=>{printScore();blurToolbar();});
@@ -1353,18 +1608,33 @@ document.addEventListener('keydown',e=>{
   if(e.code==='PageDown'){e.preventDefault();setScroll(scrollOffset+getViewHeight()*0.8);}
   if(e.code==='BracketRight'){e.preventDefault();setTranspose(transpose+1);}
   if(e.code==='BracketLeft'){e.preventDefault();setTranspose(transpose-1);}
+  if(e.code==='KeyP' && e.shiftKey){e.preventDefault(); perfHud.classList.toggle('show');}
 });
 
 document.addEventListener('dragover',e=>{e.preventDefault();document.getElementById('dropZone').classList.add('show');});
 document.addEventListener('dragleave',e=>{if(!e.relatedTarget)document.getElementById('dropZone').classList.remove('show');});
 document.addEventListener('drop',e=>{e.preventDefault();document.getElementById('dropZone').classList.remove('show');const f=e.dataTransfer.files[0];if(f?.name.match(/\.midi?$/i))loadFile(f);else alert('Please drop a .mid file.');});
 
-window.addEventListener('resize',()=>{const dpr=window.devicePixelRatio||1;const pa=document.getElementById('pianoArea');pianoCanvas.width=pa.clientWidth*dpr;pianoCanvas.height=pa.clientHeight*dpr;pianoCanvas.style.width=pa.clientWidth+'px';pianoCanvas.style.height=pa.clientHeight+'px';pianoCtx.setTransform(dpr,0,0,dpr,0,0);if(midi)fullRebuild();else drawPiano(true);});
+window.addEventListener('resize',()=>{
+  const dpr=window.devicePixelRatio||1;
+  const pa=document.getElementById('pianoArea');
+  pianoCanvas.width=pa.clientWidth*dpr;pianoCanvas.height=pa.clientHeight*dpr;
+  pianoCanvas.style.width=pa.clientWidth+'px';pianoCanvas.style.height=pa.clientHeight+'px';
+  pianoCtx.setTransform(dpr,0,0,dpr,0,0);
+  if(midi)fullRebuild();else drawPiano(true);
+});
 
 // ═══════════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════════
-setTimeout(()=>{const dpr=window.devicePixelRatio||1;const pa=document.getElementById('pianoArea');pianoCanvas.width=pa.clientWidth*dpr;pianoCanvas.height=pa.clientHeight*dpr;pianoCanvas.style.width=pa.clientWidth+'px';pianoCanvas.style.height=pa.clientHeight+'px';pianoCtx.setTransform(dpr,0,0,dpr,0,0);drawPiano(true);},80);
+setTimeout(()=>{
+  const dpr=window.devicePixelRatio||1;
+  const pa=document.getElementById('pianoArea');
+  pianoCanvas.width=pa.clientWidth*dpr;pianoCanvas.height=pa.clientHeight*dpr;
+  pianoCanvas.style.width=pa.clientWidth+'px';pianoCanvas.style.height=pa.clientHeight+'px';
+  pianoCtx.setTransform(dpr,0,0,dpr,0,0);
+  drawPiano(true);
+},80);
 </script>
 </body>
 </html>
