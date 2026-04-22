@@ -15,6 +15,8 @@ body {
   height:100vh; height:100dvh;
   display:flex; flex-direction:column;
   overflow:hidden; user-select:none;
+  -webkit-user-select:none;
+  -webkit-touch-callout:none;
 }
 
 #toolbar {
@@ -59,6 +61,7 @@ body {
   flex:1; background:#fff;
   overflow:hidden;
   position:relative; min-height:0;
+  touch-action:none;
 }
 #scoreCanvas {
   display:block;
@@ -79,6 +82,41 @@ body {
   box-shadow:0 0 10px rgba(233,69,96,.8); pointer-events:none;
   top:0; left:0; z-index:10;
   will-change: transform;
+  transition: box-shadow .15s;
+}
+#cursor.seeking {
+  background:#ff3366;
+  box-shadow:0 0 20px rgba(255,51,102,1), 0 0 6px rgba(255,255,255,0.8);
+}
+
+#seekTooltip {
+  position:absolute;
+  background:rgba(20,20,30,0.95);
+  color:#fff;
+  font-family:monospace;
+  font-size:12px;
+  font-weight:bold;
+  padding:4px 8px;
+  border-radius:5px;
+  pointer-events:none;
+  z-index:15;
+  display:none;
+  white-space:nowrap;
+  box-shadow:0 2px 6px rgba(0,0,0,0.3);
+  border:1px solid rgba(255,255,255,0.15);
+  transform: translate(-50%, -100%);
+  will-change: transform;
+}
+#seekTooltip.show { display:block; }
+#seekTooltip::after {
+  content:'';
+  position:absolute;
+  bottom:-5px;
+  left:50%;
+  transform:translateX(-50%);
+  border-left:5px solid transparent;
+  border-right:5px solid transparent;
+  border-top:5px solid rgba(20,20,30,0.95);
 }
 
 #scrollTrack {
@@ -108,6 +146,7 @@ body {
 #pianoArea {
   height:80px; background:#111; flex-shrink:0;
   border-top:2px solid #333; position:relative; overflow:hidden;
+  touch-action:none;
 }
 #pianoCanvas { display:block; }
 
@@ -212,6 +251,7 @@ body {
   <canvas id="scoreCanvas"></canvas>
   <canvas id="overlayCanvas"></canvas>
   <div id="cursor"></div>
+  <div id="seekTooltip"></div>
   <div id="seekOverlay"></div>
   <div id="scrollTrack">
     <div id="scrollThumb"></div>
@@ -261,7 +301,8 @@ const L={CLEF_W:56,MARGIN_LEFT:24,MARGIN_RIGHT:24,LINE_GAP:11,NOTE_H:10,RADIUS:4
 const TITLE_HEIGHT=50;
 
 const VIRT_BUFFER_ROWS = 2;
-const REDRAW_THRESHOLD_PX = 1;
+const TAP_MAX_DURATION = 200;  // ms
+const TAP_MAX_MOVEMENT = 8;    // px
 
 function staffHeight(){return 4*L.LINE_GAP;}
 function systemHeight(){return staffHeight()+L.STAFF_GAP+staffHeight();}
@@ -299,6 +340,9 @@ let eventPointer = 0;
 let activeNoteSet = new Set();
 let activeNotesSignature = '';
 let overlayNeedsRedraw = true;
+
+// Piano key flash (for visual feedback on tap)
+let pianoFlashKeys = new Map(); // midi → endTime (ms)
 
 // ═══════════════════════════════════════════════════════════
 // TICK-BASED INFRASTRUCTURE
@@ -496,6 +540,7 @@ function applyScroll(){
     renderOverlay();
   }
   updateCursor();
+  updateSeekTooltip();
 }
 
 function shouldRedrawScore(){
@@ -521,11 +566,17 @@ function updateScrollThumb(){
   const thumbTop=(scrollOffset/(totalH-viewH))*(trackH-thumbH);
   thumb.style.height=thumbH+'px';thumb.style.top=thumbTop+'px';
 }
+
+// Auto-scroll cursor into view, keeping next row also visible if possible
 function scrollToCursor(){
   const pos=tickToPos(timeToTicks(currentTime));if(!pos)return;
-  const viewH=getViewHeight(),rowTop=pos.rowY,rowBot=pos.rowY+systemVisualHeight();
-  if(rowTop<scrollOffset+10)setScroll(Math.max(0,rowTop-10));
-  else if(rowBot>scrollOffset+viewH-10)setScroll(rowBot-viewH+10);
+  const viewH=getViewHeight();
+  const rH=rowHeight();
+  const rowTop=pos.rowY;
+  // We want both current row AND next row visible → aim to show rowTop + 2*rH
+  const rowBot=rowTop + 2*rH;
+  if(rowTop<scrollOffset+10) setScroll(Math.max(0,rowTop-10));
+  else if(rowBot>scrollOffset+viewH-10) setScroll(rowBot-viewH+10);
 }
 
 let sbDragging=false,sbDragStartY=0,sbDragStartScroll=0;
@@ -537,6 +588,7 @@ function scrollbarPointerDown(e){
   if(y>=thumbTop&&y<=thumbBot){sbDragging=true;sbDragStartY=(e.clientY||e.touches?.[0]?.clientY);sbDragStartScroll=scrollOffset;thumb.classList.add('active');}
   else{const trackH=trackRect.height,thumbH=thumbRect.height;const ratio=Math.max(0,Math.min(1,(y-thumbH/2)/(trackH-thumbH)));setScroll(ratio*getMaxScroll());}
   e.preventDefault();
+  e.stopPropagation();
 }
 function scrollbarPointerMove(e){
   if(!sbDragging)return;const dy=(e.clientY||e.touches?.[0]?.clientY)-sbDragStartY;
@@ -1010,7 +1062,7 @@ function findOriginalNote(dn){
 }
 
 // ═══════════════════════════════════════════════════════════
-// CURSOR
+// CURSOR & SEEK TOOLTIP
 // ═══════════════════════════════════════════════════════════
 function updateCursor(){
   if(!midi || !layout.measures.length) return;
@@ -1020,6 +1072,38 @@ function updateCursor(){
   const c = document.getElementById('cursor');
   c.style.transform = `translate(${pos.x}px, ${pos.rowY - scrollOffset}px)`;
   c.style.height = systemVisualHeight() + 'px';
+}
+
+function setCursorSeeking(on){
+  const c = document.getElementById('cursor');
+  if(on) c.classList.add('seeking'); else c.classList.remove('seeking');
+}
+
+function formatTimeShort(s){
+  const m = Math.floor(s/60);
+  const sec = Math.floor(s%60);
+  return `${m}:${sec.toString().padStart(2,'0')}`;
+}
+
+let seekTooltipVisible=false;
+function showSeekTooltip(){
+  seekTooltipVisible=true;
+  document.getElementById('seekTooltip').classList.add('show');
+  updateSeekTooltip();
+}
+function hideSeekTooltip(){
+  seekTooltipVisible=false;
+  document.getElementById('seekTooltip').classList.remove('show');
+}
+function updateSeekTooltip(){
+  if(!seekTooltipVisible || !midi) return;
+  const tt = document.getElementById('seekTooltip');
+  const pos = tickToPos(timeToTicks(currentTime));
+  if(!pos) return;
+  tt.textContent = formatTimeShort(currentTime);
+  // position above cursor top
+  const cy = pos.rowY - scrollOffset - 4; // 4px above row top
+  tt.style.transform = `translate(${pos.x}px, ${cy}px) translate(-50%, -100%)`;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1044,16 +1128,31 @@ function buildPianoLayout(){
 }
 
 function computeActiveNotesSignature(){
-  if(activeNoteSet.size===0) return '';
-  const arr=[];
-  for(const n of activeNoteSet) arr.push(n.midi);
-  arr.sort((a,b)=>a-b);
-  return arr.join(',');
+  let sig='';
+  if(activeNoteSet.size>0){
+    const arr=[];
+    for(const n of activeNoteSet) arr.push(n.midi);
+    arr.sort((a,b)=>a-b);
+    sig = arr.join(',');
+  }
+  if(pianoFlashKeys.size>0){
+    const arr=[];
+    for(const m of pianoFlashKeys.keys()) arr.push(m);
+    arr.sort((a,b)=>a-b);
+    sig += '|flash:' + arr.join(',');
+  }
+  return sig;
 }
 
 function drawPiano(force){
+  // Clear expired flashes
+  const now = performance.now();
+  let flashChanged = false;
+  for(const [m, endT] of pianoFlashKeys){
+    if(endT <= now){ pianoFlashKeys.delete(m); flashChanged = true; }
+  }
   const sig = computeActiveNotesSignature();
-  if(!force && sig === activeNotesSignature) return;
+  if(!force && !flashChanged && sig === activeNotesSignature) return;
   activeNotesSignature = sig;
 
   const el=document.getElementById('pianoArea'),W=el.clientWidth,H=el.clientHeight;
@@ -1061,22 +1160,69 @@ function drawPiano(force){
   const activeByMidi=new Map();
   for(const n of activeNoteSet){ activeByMidi.set(n.midi+transpose, n.trackColorIdx||0); }
   const bkH=H*0.62;
-  for(const m of whiteKeys){const x=keyXMap[m],kW=keyWMap[m];const tci=activeByMidi.get(m);const isA=tci!==undefined;
-    pianoCtx.fillStyle=isA?getTrackColor(tci).active:'#f5f5f5';pianoCtx.fillRect(x,0,kW-1,H);
+  for(const m of whiteKeys){
+    const x=keyXMap[m],kW=keyWMap[m];
+    const tci=activeByMidi.get(m);
+    const isA=tci!==undefined;
+    const isFlash = pianoFlashKeys.has(m);
+    let fill = '#f5f5f5';
+    if(isA) fill = getTrackColor(tci).active;
+    else if(isFlash) fill = '#ffe066';
+    pianoCtx.fillStyle=fill;pianoCtx.fillRect(x,0,kW-1,H);
     pianoCtx.strokeStyle='#888';pianoCtx.lineWidth=0.5;pianoCtx.strokeRect(x,0,kW-1,H);
-    if(m%12===0){pianoCtx.fillStyle='#666';pianoCtx.font='bold 9px sans-serif';pianoCtx.textAlign='center';pianoCtx.textBaseline='bottom';pianoCtx.fillText(noteLabel(m),x+kW/2,H-2);}}
-  for(let m=pianoLow;m<=pianoHigh;m++){if(!isBlack(m)||keyXMap[m]===undefined)continue;const x=keyXMap[m],kW=keyWMap[m];const tci=activeByMidi.get(m);const isA=tci!==undefined;
-    pianoCtx.fillStyle=isA?getTrackColor(tci).active:'#222';pianoCtx.fillRect(x,0,kW,bkH);pianoCtx.strokeStyle='#000';pianoCtx.lineWidth=0.5;pianoCtx.strokeRect(x,0,kW,bkH);}
+    if(m%12===0){pianoCtx.fillStyle='#666';pianoCtx.font='bold 9px sans-serif';pianoCtx.textAlign='center';pianoCtx.textBaseline='bottom';pianoCtx.fillText(noteLabel(m),x+kW/2,H-2);}
+  }
+  for(let m=pianoLow;m<=pianoHigh;m++){
+    if(!isBlack(m)||keyXMap[m]===undefined)continue;
+    const x=keyXMap[m],kW=keyWMap[m];
+    const tci=activeByMidi.get(m);
+    const isA=tci!==undefined;
+    const isFlash = pianoFlashKeys.has(m);
+    let fill = '#222';
+    if(isA) fill = getTrackColor(tci).active;
+    else if(isFlash) fill = '#cc9933';
+    pianoCtx.fillStyle=fill;pianoCtx.fillRect(x,0,kW,bkH);
+    pianoCtx.strokeStyle='#000';pianoCtx.lineWidth=0.5;pianoCtx.strokeRect(x,0,kW,bkH);
+  }
   pianoCtx.textAlign='left';
 }
 
-document.getElementById('pianoCanvas').addEventListener('click',async e=>{
-  await Tone.start();const rect=document.getElementById('pianoArea').getBoundingClientRect();
-  const cx=e.clientX-rect.left,cy=e.clientY-rect.top,H=document.getElementById('pianoArea').clientHeight;
-  let hit=null;for(let m=pianoLow;m<=pianoHigh;m++){if(!isBlack(m)||keyXMap[m]===undefined)continue;if(cy<H*0.62&&cx>=keyXMap[m]&&cx<=keyXMap[m]+keyWMap[m]){hit=m;break;}}
-  if(hit===null)for(const m of whiteKeys){if(cx>=keyXMap[m]&&cx<=keyXMap[m]+keyWMap[m]){hit=m;break;}}
-  if(hit!==null){if(!synths.length)initSynths();synths[0].triggerAttackRelease(Tone.Frequency(hit,'midi').toFrequency(),'8n',Tone.now(),.7);}
+function flashPianoKey(midi){
+  pianoFlashKeys.set(midi, performance.now() + 200);
+  drawPiano(true);
+}
+
+// Piano tap handler (pointer-agnostic — works on mouse and touch)
+function handlePianoTap(clientX, clientY){
+  const rect=document.getElementById('pianoArea').getBoundingClientRect();
+  const cx=clientX-rect.left, cy=clientY-rect.top;
+  const H=document.getElementById('pianoArea').clientHeight;
+  let hit=null;
+  for(let m=pianoLow;m<=pianoHigh;m++){
+    if(!isBlack(m)||keyXMap[m]===undefined)continue;
+    if(cy<H*0.62&&cx>=keyXMap[m]&&cx<=keyXMap[m]+keyWMap[m]){hit=m;break;}
+  }
+  if(hit===null) for(const m of whiteKeys){
+    if(cx>=keyXMap[m]&&cx<=keyXMap[m]+keyWMap[m]){hit=m;break;}
+  }
+  if(hit!==null){
+    if(!synths.length)initSynths();
+    synths[0].triggerAttackRelease(Tone.Frequency(hit,'midi').toFrequency(),'8n',Tone.now(),.7);
+    flashPianoKey(hit);
+  }
+}
+
+document.getElementById('pianoCanvas').addEventListener('mousedown', async e=>{
+  await Tone.start();
+  handlePianoTap(e.clientX, e.clientY);
 });
+document.getElementById('pianoCanvas').addEventListener('touchstart', async e=>{
+  if(e.touches.length!==1) return;
+  await Tone.start();
+  const t=e.touches[0];
+  handlePianoTap(t.clientX, t.clientY);
+  e.preventDefault();
+}, {passive:false});
 
 // ═══════════════════════════════════════════════════════════
 // PERF HUD
@@ -1115,6 +1261,8 @@ function animate(ts){
     renderOverlay();
     drawPiano(false);
   }
+  // Keep piano fresh for flash expiry
+  if(pianoFlashKeys.size>0) drawPiano(false);
 
   updateTimeDisplay();
   scrollToCursor();
@@ -1249,6 +1397,7 @@ function seekTo(t, follow){
   syncActiveNotes();
   if(isPlaying){ Tone.Transport.cancel(); scheduledIds=[]; scheduleAudio(); }
   updateCursor();
+  updateSeekTooltip();
   renderOverlay();
   drawPiano(false);
   updateTimeDisplay();
@@ -1533,22 +1682,145 @@ function printScore(){
 }
 
 // ═══════════════════════════════════════════════════════════
-// SEEK INTERACTION
+// INTERACTION — Unified Pointer Model
 // ═══════════════════════════════════════════════════════════
-let isDragging=false,dragStartX=0,dragStartY=0,dragMoved=false;const DRAG_THRESHOLD=8;
+//
+// DESKTOP (mouse):
+//   - Click (<200ms, <8px) → play/pause toggle
+//   - Click & drag → seek cursor to position (follows mouse)
+//   - Wheel → scroll
+//
+// IPAD (touch):
+//   - Tap (<200ms, <8px) → play/pause toggle
+//   - 1-finger drag → score scrolls vertically AND cursor follows finger
+//     (touch pauses playback auto-scroll follow)
+//
+// ═══════════════════════════════════════════════════════════
+
 const seekOvl=document.getElementById('seekOverlay');
+const scoreAreaEl=document.getElementById('scoreArea');
 
-seekOvl.addEventListener('mousedown',e=>{if(!midi)return;isDragging=true;dragMoved=false;dragStartX=e.clientX;dragStartY=e.clientY;e.preventDefault();});
-document.addEventListener('mousemove',e=>{if(!isDragging||!midi)return;if(!dragMoved&&Math.abs(e.clientX-dragStartX)+Math.abs(e.clientY-dragStartY)>DRAG_THRESHOLD)dragMoved=true;
-  if(dragMoved){const rect=document.getElementById('scoreArea').getBoundingClientRect();const t=posToTime(e.clientX-rect.left,e.clientY-rect.top);if(t!==null)seekTo(t,true);}});
-document.addEventListener('mouseup',()=>{if(!isDragging)return;isDragging=false;if(!dragMoved&&midi)togglePlay();});
+let gesture = null; // { type: 'mouse'|'touch', startTime, startX, startY, lastX, lastY, moved, startScroll, wasPlaying }
 
-let touchId=null;
-seekOvl.addEventListener('touchstart',e=>{if(!midi||e.touches.length!==1)return;const touch=e.touches[0];touchId=touch.identifier;isDragging=true;dragMoved=false;dragStartX=touch.clientX;dragStartY=touch.clientY;e.preventDefault();},{passive:false});
-seekOvl.addEventListener('touchmove',e=>{if(!isDragging||!midi)return;const touch=[...e.changedTouches].find(t=>t.identifier===touchId);if(!touch)return;
-  if(!dragMoved&&Math.abs(touch.clientX-dragStartX)+Math.abs(touch.clientY-dragStartY)>DRAG_THRESHOLD)dragMoved=true;
-  if(dragMoved){const rect=document.getElementById('scoreArea').getBoundingClientRect();const t=posToTime(touch.clientX-rect.left,touch.clientY-rect.top);if(t!==null)seekTo(t,true);e.preventDefault();}},{passive:false});
-seekOvl.addEventListener('touchend',e=>{const touch=[...e.changedTouches].find(t=>t.identifier===touchId);if(!touch)return;if(!dragMoved&&midi)togglePlay();isDragging=false;touchId=null;});
+function gestureStart(type, clientX, clientY){
+  if(!midi) return;
+  gesture = {
+    type,
+    startTime: performance.now(),
+    startX: clientX, startY: clientY,
+    lastX: clientX, lastY: clientY,
+    moved: false,
+    startScroll: scrollOffset,
+    wasPlaying: isPlaying
+  };
+  // On touch: stop playback auto-scroll immediately (but keep audio playing until we know it's a drag)
+  // We won't pause audio on touch-start — only on actual drag.
+  setCursorSeeking(true);
+}
+
+function gestureMove(clientX, clientY){
+  if(!gesture) return;
+  const dx = clientX - gesture.startX;
+  const dy = clientY - gesture.startY;
+  const dist = Math.abs(dx) + Math.abs(dy);
+
+  if(!gesture.moved && dist > TAP_MAX_MOVEMENT){
+    gesture.moved = true;
+    // On touch drag: pause playback so the user takes over
+    if(gesture.type === 'touch' && isPlaying){
+      pausePlayback();
+    }
+    showSeekTooltip();
+  }
+
+  if(gesture.moved){
+    if(gesture.type === 'touch'){
+      // 1-finger drag: scroll score by vertical finger delta (from previous frame)
+      const deltaY = clientY - gesture.lastY;
+      setScroll(scrollOffset - deltaY);
+      // Cursor follows finger position (finger X,Y in score coords)
+      const rect = scoreAreaEl.getBoundingClientRect();
+      const t = posToTime(clientX - rect.left, clientY - rect.top);
+      if(t !== null) seekTo(t, false); // no auto-follow while user is actively scrolling
+    } else {
+      // Mouse drag: cursor follows mouse, score stays put
+      const rect = scoreAreaEl.getBoundingClientRect();
+      const t = posToTime(clientX - rect.left, clientY - rect.top);
+      if(t !== null) seekTo(t, true);
+    }
+  }
+  gesture.lastX = clientX;
+  gesture.lastY = clientY;
+}
+
+function gestureEnd(){
+  if(!gesture) return;
+  const duration = performance.now() - gesture.startTime;
+
+  if(!gesture.moved && duration < TAP_MAX_DURATION){
+    // Short tap → play/pause
+    togglePlay();
+  }
+  // else: drag ended, cursor stays where it is
+
+  setCursorSeeking(false);
+  hideSeekTooltip();
+  gesture = null;
+}
+
+function gestureCancel(){
+  setCursorSeeking(false);
+  hideSeekTooltip();
+  gesture = null;
+}
+
+// ───── Mouse events (desktop) ─────
+seekOvl.addEventListener('mousedown', e => {
+  if(e.button !== 0) return;
+  gestureStart('mouse', e.clientX, e.clientY);
+  e.preventDefault();
+});
+document.addEventListener('mousemove', e => {
+  if(gesture && gesture.type==='mouse') gestureMove(e.clientX, e.clientY);
+});
+document.addEventListener('mouseup', e => {
+  if(gesture && gesture.type==='mouse') gestureEnd();
+});
+
+// ───── Touch events (iPad) ─────
+let activeTouchId = null;
+seekOvl.addEventListener('touchstart', async e => {
+  if(e.touches.length !== 1) {
+    // Multi-touch: cancel the current single-finger gesture
+    if(gesture){ gestureCancel(); activeTouchId=null; }
+    return;
+  }
+  await Tone.start();
+  const t = e.touches[0];
+  activeTouchId = t.identifier;
+  gestureStart('touch', t.clientX, t.clientY);
+  e.preventDefault();
+}, {passive:false});
+
+seekOvl.addEventListener('touchmove', e => {
+  if(!gesture || gesture.type!=='touch' || activeTouchId===null) return;
+  const t = [...e.changedTouches].find(tt => tt.identifier === activeTouchId);
+  if(!t) return;
+  gestureMove(t.clientX, t.clientY);
+  e.preventDefault();
+}, {passive:false});
+
+seekOvl.addEventListener('touchend', e => {
+  if(!gesture || gesture.type!=='touch' || activeTouchId===null) return;
+  const t = [...e.changedTouches].find(tt => tt.identifier === activeTouchId);
+  if(!t) return;
+  gestureEnd();
+  activeTouchId = null;
+});
+
+seekOvl.addEventListener('touchcancel', e => {
+  if(gesture && gesture.type==='touch'){ gestureCancel(); activeTouchId=null; }
+});
 
 // ═══════════════════════════════════════════════════════════
 // TOOLBAR EVENTS
