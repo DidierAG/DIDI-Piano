@@ -289,8 +289,8 @@ const NOTE_NAMES=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 const SHARP_PCS=new Set([1,3,6,8,10]);
 
 const TRACK_COLORS=[
-  {bar:'#d48000',barStroke:'#a06000',active:'#ffb833',activeBorder:'#ff8800',past:'rgba(212,128,0,.22)',text:'#fff',activeText:'#fff',label:'#8a5200',chip:'#d48000'},
-  {bar:'#2277aa',barStroke:'#185a80',active:'#44bbee',activeBorder:'#0099dd',past:'rgba(34,119,170,.22)',text:'#fff',activeText:'#fff',label:'#185a80',chip:'#2277aa'},
+  {bar:'#FDDCBB',barStroke:'#e8b88a',active:'#ffb833',activeBorder:'#ff8800',past:'rgba(253,220,187,.5)',text:'#222',activeText:'#222',label:'#8a5200',chip:'#d48000'},
+  {bar:'#C7EAFA',barStroke:'#9dc9de',active:'#44bbee',activeBorder:'#0099dd',past:'rgba(199,234,250,.5)',text:'#222',activeText:'#222',label:'#185a80',chip:'#2277aa'},
   {bar:'#2a9d4e',barStroke:'#1a7a35',active:'#4dd97a',activeBorder:'#22aa55',past:'rgba(42,157,78,.22)',text:'#fff',activeText:'#fff',label:'#1a7a35',chip:'#2a9d4e'},
   {bar:'#8844bb',barStroke:'#6633aa',active:'#bb77ee',activeBorder:'#9944dd',past:'rgba(136,68,187,.22)',text:'#fff',activeText:'#fff',label:'#6633aa',chip:'#8844bb'},
   {bar:'#cc3355',barStroke:'#aa2244',active:'#ff6688',activeBorder:'#dd3366',past:'rgba(204,51,85,.22)',text:'#fff',activeText:'#fff',label:'#aa2244',chip:'#cc3355'},
@@ -298,6 +298,22 @@ const TRACK_COLORS=[
 ];
 
 const L={CLEF_W:56,MARGIN_LEFT:24,MARGIN_RIGHT:24,LINE_GAP:11,NOTE_H:10,RADIUS:4,ROW_PAD_T:30,STAFF_GAP:54,ROW_GAP:60,ROW_PAD_B:26};
+// Note head (circle): diameter matches line gap like real engraving
+const HEAD_D = 12;              // note head diameter (px)
+const HEAD_R = HEAD_D / 2;
+const ACC_BADGE_SIZE = 11;      // # badge font size on note head (bigger)
+const ACC_BADGE_DX = -HEAD_R -1 ;  // badge position — a few px right (closer to head)
+const ACC_BADGE_DY = -HEAD_R +3 ;  // badge position — a few px down (closer to head)
+// Stems & flags
+const STEM_LENGTH = L.LINE_GAP * 2.3;  // ~2 lines tall (shorter than engraving standard)
+const STEM_WIDTH = 1.2;
+const FLAG_WIDTH = 7;           // horizontal reach of a flag
+const FLAG_HEIGHT = 6;          // vertical size of a single flag
+const FLAG_SPACING = 4;         // vertical spacing between stacked flags
+// Beams
+const BEAM_THICKNESS = 3;       // thickness of a beam bar
+const BEAM_SPACING = 4;         // vertical gap between stacked beams
+
 const TITLE_HEIGHT=75;
 
 const VIRT_BUFFER_ROWS = 2;
@@ -950,11 +966,30 @@ function renderScore(){
     drawRow(scoreCtx, row, W, acc);
   }
 
-  for(let ri=first; ri<=last; ri++){
+    for(let ri=first; ri<=last; ri++){
     const notes = notesByRow[ri];
+    // Step 1: ledgers + bars + heads + accidentals
     for(const dn of notes){
-      drawBaseNote(scoreCtx, dn);
+      drawBaseNote(scoreCtx, dn, notes, acc);
     }
+    // Step 2: chord units → stems + flags
+    const units = buildChordUnits(notes);
+    const beamMap = buildBeamGroupsFromUnits(units);
+    for(const u of units){
+      drawUnitStem(scoreCtx, u, beamMap.get(u));
+    }
+    // Step 3: beams (drawn once per group)
+    const drawnBeams = new Set();
+    for(const [u, beam] of beamMap){
+      if(drawnBeams.has(beam)) continue;
+      drawnBeams.add(beam);
+      drawBeam(scoreCtx, beam);
+    }
+  }
+
+  // Step 4: beat sub-lines on top of bars
+  for(let ri=first; ri<=last; ri++){
+    drawBeatLinesForRow(scoreCtx, layout.rows[ri]);
   }
 
   scoreCtx.restore();
@@ -967,21 +1002,39 @@ function renderScore(){
   renderOverlay();
 }
 
-function drawBaseNote(ctx, dn){
+function drawBaseNote(ctx, dn, rowNotes, accMap){
   if(dn.hand==='none' || dn.x == null) return;
   const cl = getTrackColor(dn.trackColorIdx||0);
+
+  // 1. Ledger lines
   drawLedger(ctx, dn.dispMidi, dn.hand, dn.rowY, dn.x, dn.nW);
-  pillSplit(ctx, dn.x, dn.ny, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
-  ctx.fillStyle = cl.bar; ctx.fill();
-  pillSplit(ctx, dn.x, dn.ny, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
-  ctx.strokeStyle = cl.barStroke; ctx.lineWidth = 0.7; ctx.stroke();
-  if(dn.isContinuation){
-    ctx.fillStyle = cl.barStroke; ctx.font='bold 8px sans-serif';
-    ctx.textAlign='left'; ctx.textBaseline='middle';
-    ctx.fillText('~', dn.x+1, dn.cy+0.5);
+
+  // 2. Duration bar (pill) — always drawn when bar is wider than note head
+  //    When note head covers the bar entirely, we skip the bar.
+  const showBar = dn.nW > HEAD_D;
+  if(showBar){
+    const barX = dn.x;
+    const barY = dn.cy - L.NOTE_H/2;
+    pillSplit(ctx, barX, barY, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
+    ctx.fillStyle = cl.bar; ctx.fill();
+    pillSplit(ctx, barX, barY, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
+    ctx.strokeStyle = cl.barStroke; ctx.lineWidth = 0.7; ctx.stroke();
   }
-  if(!dn.isContinuation || dn.nW>20)
-    drawNoteLabel(ctx, dn, dn.dispMidi, dn.x+(dn.isContinuation?8:0), dn.nW-(dn.isContinuation?8:0), dn.cy, cl.text, cl.label);
+
+    // 3. Note head (only on first segment of a note; continuations show just the bar)
+  // Stems/flags/beams now drawn separately (per chord unit) — see render loop
+  if(!dn.isContinuation){
+    drawNoteHead(ctx, dn, null);
+    const acc = isAccidental(dn.dispMidi, accMap);
+    if(acc) drawAccidentalBadge(ctx, dn, acc);
+  } else if(dn.nW > 8){
+    // Continuation marker on long continuation segments
+    ctx.fillStyle = cl.barStroke;
+    ctx.font = 'bold 8px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('~', dn.x + 2, dn.cy + 0.5);
+  }
 }
 
 function drawRow(ctx,row,W,acc){
@@ -1056,12 +1109,7 @@ function drawRow(ctx,row,W,acc){
       ctx.fillText(`♩= ${Math.round(m.bpm)}`,x+3,tT-7);
     }
     prevBpm=m.bpm;
-    for(let b=1;b<m.beatsPerMeasure;b++){
-      const bx=x+b*(m.width/m.beatsPerMeasure);
-      ctx.strokeStyle='rgba(0,0,0,0.22)';ctx.lineWidth=0.5;
-      ctx.beginPath();ctx.moveTo(bx,tT);ctx.lineTo(bx,tT+sH);ctx.stroke();
-      ctx.beginPath();ctx.moveTo(bx,bT);ctx.lineTo(bx,bT+sH);ctx.stroke();
-    }
+    // Beat sub-lines drawn later (after notes) so they sit on top
   }
 
   const lastM=layout.measures[mEnd-1];
@@ -1079,6 +1127,342 @@ function drawRow(ctx,row,W,acc){
   }
 }
 
+function drawBeatLinesForRow(ctx, row){
+  const {mStart, mEnd, y} = row;
+  const tT = trebleTop(y), bT = bassTop(y), sH = staffHeight();
+  const cpW = clefPanelWidth();
+  for(let mi = mStart; mi < mEnd; mi++){
+    const m = layout.measures[mi];
+    if(!m) continue;
+    const x = cpW + m.xInRow;
+    for(let b = 1; b < m.beatsPerMeasure; b++){
+      const bx = x + b * (m.width / m.beatsPerMeasure);
+      ctx.strokeStyle = 'rgba(0,0,0,0.28)';
+      ctx.lineWidth = 0.5;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(bx, tT); ctx.lineTo(bx, tT + sH); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(bx, bT); ctx.lineTo(bx, bT + sH); ctx.stroke();
+    }
+  }
+  ctx.setLineDash([]);
+}
+
+// Quantize a note duration (in beats) to a flag count.
+// ≥1 beat → 0 flags (stem only, quarter-like)
+// ~0.5   → 1 flag  (eighth / croche)
+// ~0.25  → 2 flags (sixteenth)
+// ≤0.125 → 3 flags (max)
+function flagCountForDuration(durationBeats){
+  if(durationBeats >= 0.75) return 0;    // snap to quarter
+  if(durationBeats >= 0.375) return 1;   // snap to eighth
+  if(durationBeats >= 0.1875) return 2;  // snap to sixteenth
+  return 3;                              // anything shorter → 3 flags max
+}
+
+// Compute a note's duration in beats using its tick-based duration
+// (more accurate than `duration` seconds which can vary with tempo changes).
+function noteDurationInBeats(dn){
+  // Use drawDurationTicks if this is a split, else full durationTicks
+  const ticks = dn.durationTicks; // use full note duration for rhythm classification
+  return ticks / ppq;
+}
+
+// Determine stem direction based on note position relative to its staff's middle line.
+// Treble middle line = B4 (midi 71). Bass middle line = D3 (midi 50).
+// Above middle line → stem down. On or below → stem up.
+function stemDirection(dispMidi, hand){
+  const middleMidi = (hand === 'right') ? 71 : 50;
+  return (dispMidi > middleMidi) ? 'down' : 'up';
+}
+
+// Decide if a displayed midi pitch is accidental (sharp/flat) given current key signature
+function isAccidental(dispMidi, accMap){
+  const pc = ((dispMidi % 12) + 12) % 12;
+  const inKeySig = accMap.has(pc);
+  const isSharpPc = SHARP_PCS.has(pc);
+  // If pitch is black-key and not in key sig → needs accidental
+  // If pitch is white-key and in key sig → needs natural (we'll treat as accidental for now)
+  // Simple approach: show # for black keys not in a sharp-key-sig, show ♭ for black keys in flat-key-sig
+  if(isSharpPc && !inKeySig) return '#';
+  return null;
+}
+
+
+
+// Draw the circular note head with letter inside (or # if accidental position is inside)
+function drawNoteHead(ctx, dn, accPos){
+  const cx = dn.x + HEAD_R;
+  const cy = dn.cy;
+  // Dark circle
+  ctx.beginPath();
+  ctx.arc(cx, cy, HEAD_R, 0, Math.PI*2);
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fill();
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+  // Letter (or # if accidental is inside)
+  const label = (accPos === 'inside') ? '#' : noteName(dn.dispMidi).charAt(0);
+  ctx.fillStyle = '#f5e6c8'; // cream/light color for contrast on dark head
+  ctx.font = `bold ${HEAD_D - 3}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, cx, cy + 0.5);
+}
+
+// Draw a small # or ♭ badge on the top-left corner of a note head.
+// No more cascade / collision logic — the badge is part of the head.
+function drawAccidentalBadge(ctx, dn, sym){
+  const cx = dn.x + HEAD_R;
+  const cy = dn.cy;
+  const bx = cx + ACC_BADGE_DX;
+  const by = cy + ACC_BADGE_DY;
+  const symChar = sym === '#' ? '♯' : '♭';
+
+  ctx.font = `bold ${ACC_BADGE_SIZE}px serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  // Light halo for readability against any background
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = '#fff';
+  ctx.strokeText(symChar, bx, by);
+  // Dark fill
+  ctx.fillStyle = '#000';
+  ctx.fillText(symChar, bx, by);
+}
+
+// ─── Chord & beam grouping ────────────────────────────────────────────────
+//
+// "Chord unit" = 1+ notes at the same drawTick, same hand, same durationTicks.
+// Each chord unit shares ONE stem (drawn from extreme note head, extending
+// past the cluster by STEM_LENGTH in the stem direction).
+//
+// Notes at same tick & hand but DIFFERENT durations are NOT grouped — each
+// gets its own stem (per Option A).
+//
+// Beam group = 2+ consecutive chord units (same hand, same beat, same flag
+// count). Beam replaces the flags.
+// ──────────────────────────────────────────────────────────────────────────
+
+// Group a row's notes into "chord units" keyed by (hand, drawTick, durationTicks).
+// Returns: array of units, each = { notes: [...], hand, drawTick, durationTicks, flagCount, stemDir, stemX, headTopY, headBotY }
+function buildChordUnits(rowNotes){
+  const units = new Map();
+  for(const dn of rowNotes){
+    if(dn.isContinuation || dn.x == null) continue;
+    if(dn.hand !== 'right' && dn.hand !== 'left') continue;
+    const key = `${dn.hand}|${dn.drawTick}|${dn.durationTicks}`;
+    if(!units.has(key)){
+      units.set(key, {
+        notes: [],
+        hand: dn.hand,
+        drawTick: dn.drawTick,
+        durationTicks: dn.durationTicks,
+      });
+    }
+    units.get(key).notes.push(dn);
+  }
+  // Compute geometry for each unit
+  const result = [];
+  for(const u of units.values()){
+    const beats = u.durationTicks / ppq;
+    u.flagCount = flagCountForDuration(beats);
+    u.tooLong = beats >= 2; // no stem for very long notes
+    // Stem direction: use the average pitch of the chord vs middle line
+    const middleMidi = (u.hand === 'right') ? 71 : 50;
+    const avgMidi = u.notes.reduce((s,n)=>s+n.dispMidi,0) / u.notes.length;
+    u.stemDir = (avgMidi > middleMidi) ? 'down' : 'up';
+    // Sort notes by cy (top→bottom on screen, so smallest cy first)
+    u.notes.sort((a,b)=>a.cy - b.cy);
+    u.headTopY = u.notes[0].cy;
+    u.headBotY = u.notes[u.notes.length-1].cy;
+    // Stem X: same side for all chord notes
+    const ref = u.notes[0];
+    const cx = ref.x + HEAD_R;
+    u.stemX = (u.stemDir === 'up') ? cx + HEAD_R - STEM_WIDTH/2 : cx - HEAD_R + STEM_WIDTH/2;
+    result.push(u);
+  }
+  return result;
+}
+
+// Group chord units into beam groups.
+// Rule: 2+ consecutive units, same hand, same beat, same flag count (≥1).
+// Returns: Map<unit, beamGroup>, where beamGroup = { units, flagCount, dir }
+function buildBeamGroupsFromUnits(units){
+  const map = new Map();
+  // Sort by hand, then tick
+  const byHand = { right: [], left: [] };
+  for(const u of units) byHand[u.hand].push(u);
+  for(const hand of ['right','left']) byHand[hand].sort((a,b)=>a.drawTick - b.drawTick);
+
+  for(const hand of ['right','left']){
+    const list = byHand[hand];
+    let i = 0;
+    while(i < list.length){
+      const u0 = list[i];
+      if(u0.flagCount < 1 || u0.tooLong){ i++; continue; }
+      const m = layout.measures[findMeasureIndexByTick(u0.drawTick)];
+      if(!m){ i++; continue; }
+      const beatIdx = Math.floor((u0.drawTick - m.startTick) / m.ticksPerBeat);
+      const beatStartTick = m.startTick + beatIdx * m.ticksPerBeat;
+      const beatEndTick = beatStartTick + m.ticksPerBeat;
+
+      const group = [u0];
+      let j = i + 1;
+      while(j < list.length){
+        const c = list[j];
+        if(c.drawTick >= beatEndTick) break;
+        if(c.flagCount !== u0.flagCount) break;
+        if(c.tooLong) break;
+        group.push(c);
+        j++;
+      }
+            if(group.length >= 2){
+        // Determine ONE shared direction for the whole beam group, based on
+        // the average pitch of all chord units' average pitches.
+        // Above middle line → stem down; on/below → stem up.
+        const middleMidi = (hand === 'right') ? 71 : 50;
+        let sumPitch = 0, count = 0;
+        for(const u of group){
+          for(const n of u.notes){ sumPitch += n.dispMidi; count++; }
+        }
+        const groupAvg = sumPitch / count;
+        const dir = (groupAvg > middleMidi) ? 'down' : 'up';
+
+        // Force all units in the group to share the same direction AND stem side
+        for(const u of group){
+          u.stemDir = dir;
+          const ref = u.notes[0];
+          const cx = ref.x + HEAD_R;
+          u.stemX = (dir === 'up')
+            ? cx + HEAD_R - STEM_WIDTH/2
+            : cx - HEAD_R + STEM_WIDTH/2;
+        }
+
+        const beam = { units: group, flagCount: group[0].flagCount, dir };
+        for(const u of group) map.set(u, beam);
+      }
+      i = j > i ? j : i + 1;
+    }
+  }
+  return map;
+}
+
+// Draw a chord unit's stem. If part of a beam group, the stem extends to
+// the BEAM's calculated Y at this unit's X (slanted beam support).
+function drawUnitStem(ctx, unit, beam){
+  if(unit.tooLong) return;
+  const dir = unit.stemDir;
+  const stemX = unit.stemX;
+  const headStartY = (dir === 'up') ? unit.headBotY : unit.headTopY;
+
+  let stemEndY;
+  if(beam){
+    // Stem reaches the beam line at this unit's X coord
+    stemEndY = beamYAtX(beam, stemX);
+  } else {
+    stemEndY = (dir === 'up')
+      ? unit.headTopY - STEM_LENGTH
+      : unit.headBotY + STEM_LENGTH;
+  }
+
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = STEM_WIDTH;
+  ctx.beginPath();
+  ctx.moveTo(stemX, headStartY);
+  ctx.lineTo(stemX, stemEndY);
+  ctx.stroke();
+
+  unit._stemEndY = stemEndY;
+
+  // Draw flags only if NOT in a beam group
+  if(!beam && unit.flagCount > 0){
+    ctx.fillStyle = '#000';
+    for(let i = 0; i < unit.flagCount; i++){
+      const fy = (dir === 'up')
+        ? stemEndY + i * FLAG_SPACING
+        : stemEndY - i * FLAG_SPACING;
+      drawFlag(ctx, stemX, fy, dir);
+    }
+  }
+}
+
+// Compute beam Y at a given x, using the line between first and last unit's
+// natural stem-tip positions. This makes the beam slant naturally and each
+// stem reaches it.
+function beamYAtX(beam, x){
+  const units = beam.units;
+  const dir = beam.dir;
+  // Each unit's natural tip Y (where its stem WOULD end without the beam)
+  const tipY = (u) => (dir === 'up')
+    ? u.headTopY - STEM_LENGTH
+    : u.headBotY + STEM_LENGTH;
+  const first = units[0], last = units[units.length-1];
+  const x1 = first.stemX, y1 = tipY(first);
+  const x2 = last.stemX,  y2 = tipY(last);
+  if(x2 === x1) return y1;
+  const t = (x - x1) / (x2 - x1);
+  return y1 + t * (y2 - y1);
+}
+
+
+function drawFlag(ctx, stemX, stemEndY, dir){
+  ctx.beginPath();
+  if(dir === 'up'){
+    ctx.moveTo(stemX, stemEndY);
+    ctx.quadraticCurveTo(
+      stemX + FLAG_WIDTH * 1.1, stemEndY + FLAG_HEIGHT * 0.4,
+      stemX + FLAG_WIDTH, stemEndY + FLAG_HEIGHT
+    );
+    ctx.lineTo(stemX + FLAG_WIDTH * 0.7, stemEndY + FLAG_HEIGHT + 1);
+    ctx.quadraticCurveTo(
+      stemX + FLAG_WIDTH * 0.5, stemEndY + FLAG_HEIGHT * 0.6,
+      stemX, stemEndY + FLAG_HEIGHT * 0.3
+    );
+  } else {
+    ctx.moveTo(stemX, stemEndY);
+    ctx.quadraticCurveTo(
+      stemX + FLAG_WIDTH * 1.1, stemEndY - FLAG_HEIGHT * 0.4,
+      stemX + FLAG_WIDTH, stemEndY - FLAG_HEIGHT
+    );
+    ctx.lineTo(stemX + FLAG_WIDTH * 0.7, stemEndY - FLAG_HEIGHT - 1);
+    ctx.quadraticCurveTo(
+      stemX + FLAG_WIDTH * 0.5, stemEndY - FLAG_HEIGHT * 0.6,
+      stemX, stemEndY - FLAG_HEIGHT * 0.3
+    );
+  }
+  ctx.closePath();
+  ctx.fill();
+}
+
+// Draw one or more beam bars connecting all stems in a beam group
+function drawBeam(ctx, beam){
+  const units = beam.units;
+  if(units.length < 2) return;
+  const dir = beam.dir;
+  const x1 = units[0].stemX;
+  const x2 = units[units.length-1].stemX;
+  const y1 = beamYAtX(beam, x1);
+  const y2 = beamYAtX(beam, x2);
+
+  ctx.fillStyle = '#000';
+  for(let b = 0; b < beam.flagCount; b++){
+    // For each beam bar, offset perpendicular-ish (just vertical for simplicity)
+    const dy = (dir === 'up')
+      ? b * BEAM_SPACING
+      : -b * BEAM_SPACING - BEAM_THICKNESS;
+    const dyTop = (dir === 'up') ? dy : dy;
+    // Draw as a parallelogram: 4 points
+    ctx.beginPath();
+    ctx.moveTo(x1 - STEM_WIDTH/2, y1 + dyTop);
+    ctx.lineTo(x2 + STEM_WIDTH/2, y2 + dyTop);
+    ctx.lineTo(x2 + STEM_WIDTH/2, y2 + dyTop + BEAM_THICKNESS);
+    ctx.lineTo(x1 - STEM_WIDTH/2, y1 + dyTop + BEAM_THICKNESS);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
 function drawNoteLabel(ctx,note,dispMidi,x,nW,cy,insideColor,outsideColor){
   const label=noteName(dispMidi);
   let fs=Math.min(9,L.NOTE_H-1);ctx.font=`bold ${fs}px sans-serif`;let tw=ctx.measureText(label).width;
@@ -1091,7 +1475,10 @@ function drawNoteLabel(ctx,note,dispMidi,x,nW,cy,insideColor,outsideColor){
 
 function drawLedger(ctx,m,hand,rowY,noteX,noteW){
   const sTop=hand==='right'?trebleTop(rowY):bassTop(rowY),sBot=sTop+staffHeight();
-  const cy=noteY(m,hand,rowY),lw=Math.max(noteW*0.5+6,12),lx=noteX+noteW/2-lw/2;
+  const cy=noteY(m,hand,rowY);
+  // Ledger spans the note head (not the duration bar) — centered on head
+  const lw = HEAD_D + 4;
+  const lx = noteX + HEAD_R - lw/2;
   ctx.strokeStyle='#999';ctx.lineWidth=0.7;
   if(cy<sTop-L.LINE_GAP*0.4){for(let ly=sTop-L.LINE_GAP;ly>=cy-1;ly-=L.LINE_GAP){ctx.beginPath();ctx.moveTo(lx,ly);ctx.lineTo(lx+lw,ly);ctx.stroke();}}
   if(cy>sBot+L.LINE_GAP*0.4){for(let ly=sBot+L.LINE_GAP;ly<=cy+1;ly+=L.LINE_GAP){ctx.beginPath();ctx.moveTo(lx,ly);ctx.lineTo(lx+lw,ly);ctx.stroke();}}
@@ -1104,6 +1491,7 @@ function renderOverlay(){
   if(!midi || !layout.rows.length) return;
   const W = document.getElementById('scoreArea').clientWidth;
   const {first, last, offsetY, heightCss} = computeVirtRange();
+  const _overlayAccMap = keySigAcc();
 
   const dpr = window.devicePixelRatio || 1;
   const needResize = overlayCanvas.width !== Math.round(W*dpr) || overlayCanvas.height !== Math.round(heightCss*dpr);
@@ -1128,27 +1516,50 @@ function renderOverlay(){
     for(const dn of notes){
       if(dn.hand==='none' || dn.x==null) continue;
       const isActive = activeNoteSet.has(findOriginalNote(dn));
-      const isPast = (currentTime >= dn.time + dn.duration);
-      if(!isActive && !isPast) continue;
+      
+        if(!isActive) continue;
       const cl = getTrackColor(dn.trackColorIdx||0);
+      const showBar = dn.nW > HEAD_D;
 
-      if(isPast){
-        pillSplit(overlayCtx, dn.x, dn.ny, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
-        overlayCtx.fillStyle = cl.past; overlayCtx.fill();
-      }
       if(isActive){
-        pillSplit(overlayCtx, dn.x, dn.ny, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
-        overlayCtx.fillStyle = cl.active; overlayCtx.fill();
-        pillSplit(overlayCtx, dn.x, dn.ny, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
-        overlayCtx.strokeStyle = cl.activeBorder; overlayCtx.lineWidth = 1.5; overlayCtx.stroke();
-        overlayCtx.save();
-        overlayCtx.shadowColor = cl.active; overlayCtx.shadowBlur = 12;
-        pillSplit(overlayCtx, dn.x, dn.ny, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
-        overlayCtx.fillStyle = cl.active; overlayCtx.fill();
-        overlayCtx.restore();
-        if(!dn.isContinuation || dn.nW>20)
-          drawNoteLabel(overlayCtx, dn, dn.dispMidi, dn.x+(dn.isContinuation?8:0), dn.nW-(dn.isContinuation?8:0), dn.cy, cl.activeText, cl.activeText);
+        if(showBar){
+          pillSplit(overlayCtx, dn.x, dn.ny, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
+          overlayCtx.fillStyle = cl.active; overlayCtx.fill();
+          pillSplit(overlayCtx, dn.x, dn.ny, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
+          overlayCtx.strokeStyle = cl.activeBorder; overlayCtx.lineWidth = 1.5; overlayCtx.stroke();
+          overlayCtx.save();
+          overlayCtx.shadowColor = cl.active; overlayCtx.shadowBlur = 12;
+          pillSplit(overlayCtx, dn.x, dn.ny, dn.nW, L.NOTE_H, L.RADIUS, dn.isContinuation, dn.isSplit);
+          overlayCtx.fillStyle = cl.active; overlayCtx.fill();
+          overlayCtx.restore();
+        }
+        // Active note head: highlight with track color
+        if(!dn.isContinuation){
+          const cx = dn.x + HEAD_R, cy = dn.cy;
+          overlayCtx.save();
+          overlayCtx.shadowColor = cl.active;
+          overlayCtx.shadowBlur = 10;
+          overlayCtx.beginPath();
+          overlayCtx.arc(cx, cy, HEAD_R, 0, Math.PI*2);
+          overlayCtx.fillStyle = cl.active;
+          overlayCtx.fill();
+          overlayCtx.restore();
+          overlayCtx.beginPath();
+          overlayCtx.arc(cx, cy, HEAD_R, 0, Math.PI*2);
+          overlayCtx.strokeStyle = cl.activeBorder;
+          overlayCtx.lineWidth = 1.5;
+          overlayCtx.stroke();
+            overlayCtx.fillStyle = '#1a1a1a';
+          overlayCtx.font = `bold ${HEAD_D - 3}px sans-serif`;
+          overlayCtx.textAlign = 'center';
+          overlayCtx.textBaseline = 'middle';
+          overlayCtx.fillText(noteName(dn.dispMidi).charAt(0), cx, cy + 0.5);
+          // Redraw sharp badge on top so it stays visible during active highlight
+          const overlayAcc = isAccidental(dn.dispMidi, _overlayAccMap);
+          if(overlayAcc) drawAccidentalBadge(overlayCtx, dn, overlayAcc);
+        }
       }
+
     }
   }
 
@@ -1735,12 +2146,7 @@ function printScore(){
         const showTempo=(m.index===0)||(prevBpm!==null&&Math.abs(m.bpm-prevBpm)>0.5);
         if(showTempo){ctx.fillStyle='#222';ctx.font='bold 14px sans-serif';ctx.textBaseline='bottom';ctx.fillText(`♩= ${Math.round(m.bpm)}`,x+3,tT-7);}
         prevBpm=m.bpm;
-        for(let b=1;b<m.beatsPerMeasure;b++){
-          const bx=x+b*(m.width/m.beatsPerMeasure);
-          ctx.strokeStyle='rgba(0,0,0,0.22)';ctx.lineWidth=0.5;
-          ctx.beginPath();ctx.moveTo(bx,tT);ctx.lineTo(bx,tT+sH);ctx.stroke();
-          ctx.beginPath();ctx.moveTo(bx,bT);ctx.lineTo(bx,bT+sH);ctx.stroke();
-        }
+        
       }
 
       const lastM=pRow.measures[pRow.measures.length-1];
@@ -1751,6 +2157,8 @@ function printScore(){
         else{ctx.strokeStyle='#444';ctx.lineWidth=1.0;ctx.beginPath();ctx.moveTo(xEnd,tT);ctx.lineTo(xEnd,sysBot);ctx.stroke();}
       }
 
+            // First pass: compute x/cy for each note so collision detection works
+      const printRowNotes = [];
       for(const dn of printNotesByRow[ri]){
         if(dn.hand==='none')continue;
         let noteMeas=null;
@@ -1762,18 +2170,58 @@ function printScore(){
         const nx=printCpW+noteMeas.xInRow+fracStart*noteMeas.width;
         const nW=Math.max(fracDur*noteMeas.width,4);
         const dispMidi=dn.midi+transpose;
-        const cy=noteY(dispMidi,dn.hand,yOffset),ny=cy-L.NOTE_H/2;
+        const cy=noteY(dispMidi,dn.hand,yOffset);
+        printRowNotes.push({...dn, x:nx, nW, cy, dispMidi, rowY:yOffset});
+      }
+
+      for(const dn of printRowNotes){
         const cl=getTrackColor(dn.trackColorIdx||0);
         const sTop=dn.hand==='right'?trebleTop(yOffset):bassTop(yOffset),sSBot=sTop+staffHeight();
-        const lw=Math.max(nW*0.5+6,12),lx=nx+nW/2-lw/2;
+        const lw = HEAD_D + 4;
+        const lx = dn.x + HEAD_R - lw/2;
         ctx.strokeStyle='#999';ctx.lineWidth=0.7;
-        if(cy<sTop-L.LINE_GAP*0.4){for(let ly=sTop-L.LINE_GAP;ly>=cy-1;ly-=L.LINE_GAP){ctx.beginPath();ctx.moveTo(lx,ly);ctx.lineTo(lx+lw,ly);ctx.stroke();}}
-        if(cy>sSBot+L.LINE_GAP*0.4){for(let ly=sSBot+L.LINE_GAP;ly<=cy+1;ly+=L.LINE_GAP){ctx.beginPath();ctx.moveTo(lx,ly);ctx.lineTo(lx+lw,ly);ctx.stroke();}}
-        pillSplit(ctx,nx,ny,nW,L.NOTE_H,L.RADIUS,dn.isContinuation,dn.isSplit);ctx.fillStyle=cl.bar;ctx.fill();
-        pillSplit(ctx,nx,ny,nW,L.NOTE_H,L.RADIUS,dn.isContinuation,dn.isSplit);ctx.strokeStyle=cl.barStroke;ctx.lineWidth=0.7;ctx.stroke();
-        if(dn.isContinuation){ctx.fillStyle=cl.barStroke;ctx.font='bold 8px sans-serif';ctx.textAlign='left';ctx.textBaseline='middle';ctx.fillText('~',nx+1,cy+0.5);}
-        if(!dn.isContinuation||nW>20) drawNoteLabel(ctx,dn,dispMidi,nx+(dn.isContinuation?8:0),nW-(dn.isContinuation?8:0),cy,cl.text,cl.label);
+        if(dn.cy<sTop-L.LINE_GAP*0.4){for(let ly=sTop-L.LINE_GAP;ly>=dn.cy-1;ly-=L.LINE_GAP){ctx.beginPath();ctx.moveTo(lx,ly);ctx.lineTo(lx+lw,ly);ctx.stroke();}}
+        if(dn.cy>sSBot+L.LINE_GAP*0.4){for(let ly=sSBot+L.LINE_GAP;ly<=dn.cy+1;ly+=L.LINE_GAP){ctx.beginPath();ctx.moveTo(lx,ly);ctx.lineTo(lx+lw,ly);ctx.stroke();}}
+        const showBar = dn.nW > HEAD_D;
+        const ny = dn.cy - L.NOTE_H/2;
+        if(showBar){
+          pillSplit(ctx,dn.x,ny,dn.nW,L.NOTE_H,L.RADIUS,dn.isContinuation,dn.isSplit);ctx.fillStyle=cl.bar;ctx.fill();
+          pillSplit(ctx,dn.x,ny,dn.nW,L.NOTE_H,L.RADIUS,dn.isContinuation,dn.isSplit);ctx.strokeStyle=cl.barStroke;ctx.lineWidth=0.7;ctx.stroke();
+        }
+        if(!dn.isContinuation){
+          drawNoteHead(ctx, dn, null);
+          const accSym = isAccidental(dn.dispMidi, acc);
+          if(accSym) drawAccidentalBadge(ctx, dn, accSym);
+        } else if(dn.nW > 8){
+          ctx.fillStyle=cl.barStroke;ctx.font='bold 8px sans-serif';ctx.textAlign='left';ctx.textBaseline='middle';ctx.fillText('~',dn.x+2,dn.cy+0.5);
+        }
       }
+      
+        // Stems + flags + beams (per chord unit)
+      const printUnits = buildChordUnits(printRowNotes);
+      const printBeamMap = buildBeamGroupsFromUnits(printUnits);
+      for(const u of printUnits) drawUnitStem(ctx, u, printBeamMap.get(u));
+      const drawnPrintBeams = new Set();
+      for(const [u, beam] of printBeamMap){
+        if(drawnPrintBeams.has(beam)) continue;
+        drawnPrintBeams.add(beam);
+        drawBeam(ctx, beam);
+      }
+
+            // Beat lines on top
+      for(const m of pRow.measures){
+        const x = printCpW + m.xInRow;
+        for(let b = 1; b < m.beatsPerMeasure; b++){
+          const bx = x + b * (m.width / m.beatsPerMeasure);
+          ctx.strokeStyle = 'rgba(0,0,0,0.28)';
+          ctx.lineWidth = 0.5;
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath(); ctx.moveTo(bx, tT); ctx.lineTo(bx, tT + sH); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(bx, bT); ctx.lineTo(bx, bT + sH); ctx.stroke();
+        }
+      }
+      ctx.setLineDash([]);
+
       ctx.textAlign='left';
       yOffset+=rH;
     }
