@@ -1056,9 +1056,36 @@ function renderWaterfall(){
   scoreCanvas.style.height = viewH + 'px';
   scoreCanvas.style.transform = 'translateY(0px)';
   scoreCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  scoreCtx.clearRect(0, 0, W, viewH);
-  scoreCtx.fillStyle = '#fff';
-  scoreCtx.fillRect(0, 0, W, viewH);
+    // Octave bands: alternate white / very-light-grey, switching at each C
+  scoreCtx.fillStyle = '#F6F6F6';
+  // Collect C key positions (sorted by x)
+  const cKeys = [];
+  for(const k in keyXMap){
+    const midi = +k;
+    if((midi % 12) === 0) cKeys.push({midi, x: keyXMap[midi]});
+  }
+  cKeys.sort((a,b)=>a.x - b.x);
+  // Decide shading parity: alternate by octave number (midi/12).
+  // Even octaves = white, odd = grey (arbitrary but consistent).
+  // Draw a shaded band for each octave that's "odd".
+  for(let i = 0; i < cKeys.length; i++){
+    const ck = cKeys[i];
+    const octave = ck.midi / 12;
+    const bandStart = ck.x;
+    const bandEnd = (i + 1 < cKeys.length) ? cKeys[i + 1].x : W;
+    if(octave % 2 === 1){  // shade odd octaves
+      scoreCtx.fillRect(bandStart, 0, bandEnd - bandStart, viewH);
+    }
+  }
+  // Also handle the leftmost partial octave (before the first visible C)
+  if(cKeys.length > 0){
+    const firstC = cKeys[0];
+    const firstOctave = firstC.midi / 12;
+    // The band BEFORE the first C belongs to the previous octave (firstOctave - 1)
+    if((firstOctave - 1) % 2 === 1 && firstC.x > 0){
+      scoreCtx.fillRect(0, 0, firstC.x, viewH);
+    }
+  }
 
   // Compute the effective "play head time" — what time corresponds to the
   // top of the piano (= bottom of waterfall view) right now.
@@ -1070,9 +1097,15 @@ function renderWaterfall(){
   const maxTick = minTick + beatsInView * ppq;
 
     
-    // ─── Draw beat lines first (under notes) ───
+      // ─── Draw beat lines first (under notes) ───
   scoreCtx.lineWidth = 0.5;
-  let prevBpm = null;
+  // Find the BPM of the measure BEFORE the first visible measure (so we know
+  // if the first visible BPM is a "change" or not). Walk back through measureMap.
+  let firstVisibleIdx = -1;
+  for(let i = 0; i < measureMap.length; i++){
+    if(measureMap[i].endTick >= minTick){ firstVisibleIdx = i; break; }
+  }
+  let prevBpm = (firstVisibleIdx > 0) ? measureMap[firstVisibleIdx - 1].bpm : null;
   for(const m of measureMap){
     if(m.endTick < minTick) continue;
     if(m.startTick > maxTick) break;
@@ -1090,10 +1123,10 @@ function renderWaterfall(){
       scoreCtx.lineTo(W, y);
       scoreCtx.stroke();
 
-      // Bar number + BPM (only on downbeats, at left edge, just above the line)
-      if(isDownbeat && m.index > 0){
+            // Bar number + BPM (only on downbeats, at left edge, just above the line)
+      if(isDownbeat){
         scoreCtx.setLineDash([]);
-        // Show BPM if it changed from previous measure
+        // Show BPM if it's the first measure OR tempo changed
         const showBpm = (prevBpm === null) || Math.abs(m.bpm - prevBpm) > 0.5;
         let labelY = y - 4;
         if(showBpm){
@@ -1104,13 +1137,16 @@ function renderWaterfall(){
           scoreCtx.fillText(`♩= ${Math.round(m.bpm)}`, 8, labelY);
           labelY -= 14;
         }
-        scoreCtx.fillStyle = '#888';
-        scoreCtx.font = 'bold 10px sans-serif';
-        scoreCtx.textAlign = 'left';
-        scoreCtx.textBaseline = 'bottom';
-        scoreCtx.fillText(String(m.index + 1), 8, labelY);
+        // Bar number (skip on the very first measure of the song — we know it's "1")
+        if(m.index > 0){
+          scoreCtx.fillStyle = '#888';
+          scoreCtx.font = 'bold 10px sans-serif';
+          scoreCtx.textAlign = 'left';
+          scoreCtx.textBaseline = 'bottom';
+          scoreCtx.fillText(String(m.index + 1), 8, labelY);
+        }
+        prevBpm = m.bpm;
       }
-      if(isDownbeat) prevBpm = m.bpm;
     }
   }
   scoreCtx.setLineDash([]);
@@ -1696,18 +1732,23 @@ function drawUnitStem(ctx, unit, beam){
 // natural stem-tip positions. This makes the beam slant naturally and each
 // stem reaches it.
 function beamYAtX(beam, x){
+  // Horizontal beam: pick the most-extreme natural tip Y across all units
+  // so the beam is guaranteed to never pass through (or too close to) any head.
   const units = beam.units;
   const dir = beam.dir;
-  // Each unit's natural tip Y (where its stem WOULD end without the beam)
   const tipY = (u) => (dir === 'up')
     ? u.headTopY - STEM_LENGTH
     : u.headBotY + STEM_LENGTH;
-  const first = units[0], last = units[units.length-1];
-  const x1 = first.stemX, y1 = tipY(first);
-  const x2 = last.stemX,  y2 = tipY(last);
-  if(x2 === x1) return y1;
-  const t = (x - x1) / (x2 - x1);
-  return y1 + t * (y2 - y1);
+  let extreme = tipY(units[0]);
+  for(let i = 1; i < units.length; i++){
+    const t = tipY(units[i]);
+    if(dir === 'up'){
+      if(t < extreme) extreme = t;  // smallest Y = highest on screen
+    } else {
+      if(t > extreme) extreme = t;  // largest Y = lowest on screen
+    }
+  }
+  return extreme;
 }
 
 
@@ -2614,11 +2655,17 @@ function gestureMove(clientX, clientY){
     const dtMove = now - gesture.lastMoveTs;
 
     if(viewMode === 'waterfall'){
-      // Waterfall: drag = scroll the content (changes currentTime when paused)
-      // Finger UP (deltaY < 0) → content goes UP → see future (currentTime↑, scrollOffset↑)
       const deltaY = clientY - gesture.lastY;
-      setScroll(scrollOffset - deltaY);
-      if(dtMove > 0) gesture.velocityY = deltaY / dtMove;
+      // Convention: finger DOWN (deltaY>0) → scrollOffset DECREASES → go BACK in time
+      //             finger UP   (deltaY<0) → scrollOffset INCREASES → go FORWARD in time
+      // Touch on iPad: invert this convention so finger DOWN goes FORWARD (notes "fall faster")
+      if(gesture.type === 'touch'){
+        setScroll(scrollOffset + deltaY);
+        if(dtMove > 0) gesture.velocityY = -deltaY / dtMove;
+      } else {
+        setScroll(scrollOffset - deltaY);
+        if(dtMove > 0) gesture.velocityY = deltaY / dtMove;
+      }
       markUserScrolling();
     } else {
       // Score mode: existing behavior
