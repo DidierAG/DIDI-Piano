@@ -18,6 +18,8 @@ body {
   -webkit-user-select:none;
   -webkit-touch-callout:none;
 }
+body.waterfall-mode #pianoArea { order: 2; }
+body.waterfall-mode #scoreArea { order: 1; }
 
 #toolbar {
   background:#16213e; border-bottom:2px solid #0f3460;
@@ -236,8 +238,9 @@ body {
     <input type="checkbox" id="metroCheck">
     <label for="metroCheck">🔔 Metro</label>
   </div>
-  <div class="tg" id="trackChips"></div>
+    <div class="tg" id="trackChips"></div>
   <div class="tg">
+    <button id="btnViewMode">💧 Waterfall</button>
     <button id="btnTracks">🎹 Tracks</button>
     <button id="btnPrint">🖨 Print</button>
   </div>
@@ -340,6 +343,16 @@ let metronomeOn=false,metroSynth=null;
 let scrollOffset=0;
 let transpose=0;
 let songDisplayName='';
+
+// View mode: 'score' or 'waterfall'
+let viewMode = 'score';
+
+// Waterfall constants
+const WF_BEAT_LINE_COLOR = 'rgba(0,0,0,0.18)';
+const WF_DOWNBEAT_LINE_COLOR = 'rgba(0,0,0,0.35)';
+const WF_RADIUS = 4;
+const WF_MIN_LETTER_HEIGHT = 14;  // below this bar height, shrink letter
+const WF_MIN_BAR_FOR_LETTER = 8;  // below this bar height, skip letter entirely
 
 let layout={measuresPerRow:4,rows:[],totalHeight:0,measures:[]};
 let pianoLow=36,pianoHigh=96;
@@ -551,16 +564,47 @@ function clefPanelWidth(){return L.MARGIN_LEFT+L.CLEF_W;}
 // VIRTUALIZED SCROLL
 // ═══════════════════════════════════════════════════════════
 function getViewHeight(){return document.getElementById('scoreArea').clientHeight;}
-function getMaxScroll(){return Math.max(0,layout.totalHeight-getViewHeight());}
+function getMaxScroll(){
+  if(viewMode === 'waterfall'){
+    // Max scroll = position corresponding to totalDuration
+    const totalBeats = totalDuration > 0 ? timeToTicks(totalDuration) / ppq : 0;
+    return Math.max(0, totalBeats * pxPerBeat);
+  }
+  return Math.max(0, layout.totalHeight - getViewHeight());
+}
 
 function setScroll(val){
-  const newOffset = Math.max(0,Math.min(val,getMaxScroll()));
+  const maxS = getMaxScroll();
+  const newOffset = Math.max(0, Math.min(val, maxS));
+  if(viewMode === 'waterfall'){
+    // In waterfall, scroll directly maps to currentTime.
+    // scrollOffset=0 → currentTime=0; scrollOffset=maxS → currentTime=totalDuration
+    if(newOffset === scrollOffset) return;
+    scrollOffset = newOffset;
+    if(!isPlaying){
+      const beatsFromStart = scrollOffset / pxPerBeat;
+      const newTime = Math.max(0, Math.min(ticksToTime(beatsFromStart * ppq), totalDuration));
+      currentTime = newTime;
+      syncActiveNotes();
+      drawPiano(false);
+      updateTimeDisplay();
+    }
+    applyScroll();
+    return;
+  }
   if(newOffset === scrollOffset) return;
   scrollOffset = newOffset;
   applyScroll();
 }
 
 function applyScroll(){
+  if(viewMode === 'waterfall'){
+    // Waterfall always re-renders on scroll (no virtualization needed)
+    renderWaterfall();
+    renderWaterfallOverlay();
+    updateScrollThumb();
+    return;
+  }
   const needsScoreRedraw = shouldRedrawScore();
   if(needsScoreRedraw) {
     scoreNeedsRedraw = true;
@@ -928,10 +972,271 @@ function computeVirtRange(){
   return {first, last, offsetY, heightCss};
 }
 
+
+// ═══════════════════════════════════════════════════════════
+// WATERFALL LAYOUT & RENDER
+// ═══════════════════════════════════════════════════════════
+//
+// In waterfall mode:
+//   - Time flows top → bottom (notes "fall" toward the piano keyboard)
+//   - The cursor line is the TOP of the piano (we don't draw it explicitly)
+//   - Y axis: time. y = (totalDuration - currentTime - dt) * pxPerBeat (in beats)
+//   - X axis: piano key position (matches the keyboard exactly)
+//   - During playback: scroll auto-driven so the playhead stays at piano top.
+//   - When paused: user can scroll freely.
+//
+// The "scroll" in waterfall is conceptually different: scrollOffset represents
+// how far back in time we've scrolled from "now". scrollOffset=0 → cursor at
+// piano top (live). scrollOffset>0 → showing earlier moments.
+//
+// For unified gesture handling we still use scrollOffset, but the math differs.
+
+function waterfallTotalHeight(){
+  if(!midi) return 0;
+  // Total height = totalDuration in beats × pxPerBeat
+  const totalBeats = totalDuration > 0 ? timeToTicks(totalDuration) / ppq : 0;
+  return totalBeats * pxPerBeat;
+}
+
+// Y position (in waterfall canvas coordinates) of a given time t.
+// Convention: y=0 is the topmost (start of song), y increases downward.
+// The TOP of the piano (= cursor line) is at scrollOffset + viewH.
+// A note at time t has its bar bottom at: timeToY(t) - currentY ... wait let me redo.
+//
+// Simpler model: the canvas is drawn "as if" laid out as a tall column.
+// The viewport shows a window into it. The top-of-piano line corresponds to
+// the current "play position" in the column.
+//
+// Let totalH = waterfallTotalHeight().
+// Time t ↔ beat = timeToTicks(t)/ppq
+// Position from TOP of song (in pixels) = beat * pxPerBeat
+// We want time=currentTime to map to (viewBottom - keyboardTop_offset)
+// But keyboard is in a separate area — the score area's bottom IS effectively the cursor.
+//
+// So: y_in_view(t) = viewH - (currentTime_beats - t_beats) * pxPerBeat
+// when t == currentTime → y = viewH (at the bottom = cursor)
+// when t > currentTime → y < viewH (above cursor, future notes still falling)
+// when t < currentTime → y > viewH (below cursor, past — won't be drawn)
+
+function waterfallTimeToY(t, viewH, currentT){
+  const beatsAhead = (timeToTicks(t) - timeToTicks(currentT)) / ppq;
+  return viewH - beatsAhead * pxPerBeat;
+}
+
+// Get viewport-time at a Y in the canvas (used for seek).
+function waterfallYToTime(y, viewH, currentT){
+  const beatsAhead = (viewH - y) / pxPerBeat;
+  const targetTicks = timeToTicks(currentT) + beatsAhead * ppq;
+  return ticksToTime(targetTicks);
+}
+
+// In waterfall, "scrollOffset" represents how much we've scrolled BACK in time
+// from live. scrollOffset=0 → live (currentTime is at piano top).
+// scrollOffset>0 → showing earlier (we offset the view "downward" so future
+// notes appear lower on screen, equivalent to looking back into time).
+// While paused, the user controls this. While playing, it's forced to 0.
+function waterfallEffectiveTime(){
+  // In the new model, currentTime is always the truth.
+  // Scrolling (when paused) directly changes currentTime via setScroll.
+  return currentTime;
+}
+
+function renderWaterfall(){
+  if(!midi || !whiteKeys.length) return;
+  const W = document.getElementById('scoreArea').clientWidth;
+  const viewH = getViewHeight();
+
+  const dpr = window.devicePixelRatio || 1;
+  scoreCanvas.width = W * dpr;
+  scoreCanvas.height = viewH * dpr;
+  scoreCanvas.style.width = W + 'px';
+  scoreCanvas.style.height = viewH + 'px';
+  scoreCanvas.style.transform = 'translateY(0px)';
+  scoreCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  scoreCtx.clearRect(0, 0, W, viewH);
+  scoreCtx.fillStyle = '#fff';
+  scoreCtx.fillRect(0, 0, W, viewH);
+
+  // Compute the effective "play head time" — what time corresponds to the
+  // top of the piano (= bottom of waterfall view) right now.
+  const headTime = waterfallEffectiveTime();
+
+  // Determine visible time range
+  const beatsInView = viewH / pxPerBeat;
+  const minTick = timeToTicks(headTime);
+  const maxTick = minTick + beatsInView * ppq;
+
+    
+    // ─── Draw beat lines first (under notes) ───
+  scoreCtx.lineWidth = 0.5;
+  let prevBpm = null;
+  for(const m of measureMap){
+    if(m.endTick < minTick) continue;
+    if(m.startTick > maxTick) break;
+    for(let b = 0; b <= m.beatsPerMeasure; b++){
+      const beatTick = m.startTick + b * m.ticksPerBeat;
+      if(beatTick < minTick) continue;
+      if(beatTick > maxTick) break;
+      const beatTime = ticksToTime(beatTick);
+      const y = waterfallTimeToY(beatTime, viewH, headTime);
+      const isDownbeat = (b === 0);
+      scoreCtx.strokeStyle = isDownbeat ? WF_DOWNBEAT_LINE_COLOR : WF_BEAT_LINE_COLOR;
+      scoreCtx.setLineDash(isDownbeat ? [] : [3, 3]);
+      scoreCtx.beginPath();
+      scoreCtx.moveTo(0, y);
+      scoreCtx.lineTo(W, y);
+      scoreCtx.stroke();
+
+      // Bar number + BPM (only on downbeats, at left edge, just above the line)
+      if(isDownbeat && m.index > 0){
+        scoreCtx.setLineDash([]);
+        // Show BPM if it changed from previous measure
+        const showBpm = (prevBpm === null) || Math.abs(m.bpm - prevBpm) > 0.5;
+        let labelY = y - 4;
+        if(showBpm){
+          scoreCtx.fillStyle = '#222';
+          scoreCtx.font = 'bold 12px sans-serif';
+          scoreCtx.textAlign = 'left';
+          scoreCtx.textBaseline = 'bottom';
+          scoreCtx.fillText(`♩= ${Math.round(m.bpm)}`, 8, labelY);
+          labelY -= 14;
+        }
+        scoreCtx.fillStyle = '#888';
+        scoreCtx.font = 'bold 10px sans-serif';
+        scoreCtx.textAlign = 'left';
+        scoreCtx.textBaseline = 'bottom';
+        scoreCtx.fillText(String(m.index + 1), 8, labelY);
+      }
+      if(isDownbeat) prevBpm = m.bpm;
+    }
+  }
+  scoreCtx.setLineDash([]);
+
+  // ─── Draw notes ───
+  for(const n of allNotes){
+    if(n.hand === 'none') continue;
+    const noteEndTick = n.ticks + n.durationTicks;
+    if(noteEndTick < minTick) continue;
+    if(n.ticks > maxTick) continue;
+
+    const dispMidi = n.midi + transpose;
+    if(keyXMap[dispMidi] === undefined) continue;
+    const x = keyXMap[dispMidi];
+    const w = keyWMap[dispMidi];
+
+    // Top of bar = waterfallTimeToY(noteEnd)
+    // Bottom of bar = waterfallTimeToY(noteStart)
+    const yTop = waterfallTimeToY(n.time + n.duration, viewH, headTime);
+    const yBot = waterfallTimeToY(n.time, viewH, headTime);
+    const barH = yBot - yTop;
+    if(barH < 1) continue;
+
+    const cl = getTrackColor(n.trackColorIdx || 0);
+
+    // Draw pill
+    drawWaterfallBar(scoreCtx, x + 1, yTop, w - 2, barH, cl.bar, cl.barStroke);
+
+    // Letter
+    if(barH >= WF_MIN_BAR_FOR_LETTER){
+      drawWaterfallLabel(scoreCtx, dispMidi, x, w, yTop, yBot);
+    }
+  }
+}
+
+function drawWaterfallBar(ctx, x, y, w, h, fill, stroke){
+  const r = Math.min(WF_RADIUS, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = 0.7;
+  ctx.stroke();
+}
+
+function drawWaterfallLabel(ctx, dispMidi, x, w, yTop, yBot){
+  const barH = yBot - yTop;
+  const isAcc = SHARP_PCS.has(((dispMidi % 12) + 12) % 12);
+  const label = noteName(dispMidi); // includes # if accidental, e.g. "A#"
+  // Letter sits centered horizontally, near the BOTTOM of the bar (last seen before "landing")
+  let fontSize = 11;
+  if(barH < WF_MIN_LETTER_HEIGHT){
+    // Shrink letter for short bars
+    fontSize = Math.max(7, barH - 3);
+  }
+  ctx.font = `bold ${fontSize}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = '#222';
+  // Position letter near the bottom of the bar, with a small inset
+  const ly = Math.min(yBot - 2, yBot);
+  ctx.fillText(label, x + w/2, ly);
+}
+
+function renderWaterfallOverlay(){
+  if(!midi || !whiteKeys.length) return;
+  const W = document.getElementById('scoreArea').clientWidth;
+  const viewH = getViewHeight();
+  const dpr = window.devicePixelRatio || 1;
+
+  if(overlayCanvas.width !== Math.round(W*dpr) || overlayCanvas.height !== Math.round(viewH*dpr)){
+    overlayCanvas.width = W * dpr;
+    overlayCanvas.height = viewH * dpr;
+    overlayCanvas.style.width = W + 'px';
+    overlayCanvas.style.height = viewH + 'px';
+    overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  overlayCanvas.style.transform = 'translateY(0px)';
+  overlayCtx.clearRect(0, 0, W, viewH);
+
+  const headTime = waterfallEffectiveTime();
+  const beatsInView = viewH / pxPerBeat;
+  const minTick = timeToTicks(headTime);
+  const maxTick = minTick + beatsInView * ppq;
+
+  for(const n of activeNoteSet){
+    if(n.hand === 'none') continue;
+    const noteEndTick = n.ticks + n.durationTicks;
+    if(noteEndTick < minTick) continue;
+    if(n.ticks > maxTick) continue;
+
+    const dispMidi = n.midi + transpose;
+    if(keyXMap[dispMidi] === undefined) continue;
+    const x = keyXMap[dispMidi];
+    const w = keyWMap[dispMidi];
+
+    const yTop = waterfallTimeToY(n.time + n.duration, viewH, headTime);
+    const yBot = waterfallTimeToY(n.time, viewH, headTime);
+    const barH = yBot - yTop;
+    if(barH < 1) continue;
+
+    const cl = getTrackColor(n.trackColorIdx || 0);
+    overlayCtx.save();
+    overlayCtx.shadowColor = cl.active;
+    overlayCtx.shadowBlur = 12;
+    drawWaterfallBar(overlayCtx, x + 1, yTop, w - 2, barH, cl.active, cl.activeBorder);
+    overlayCtx.restore();
+    if(barH >= WF_MIN_BAR_FOR_LETTER){
+      drawWaterfallLabel(overlayCtx, dispMidi, x, w, yTop, yBot);
+    }
+  }
+}
+
+
 // ═══════════════════════════════════════════════════════════
 // SCORE RENDER
 // ═══════════════════════════════════════════════════════════
 function renderScore(){
+  if(viewMode === 'waterfall'){ renderWaterfall(); return; }
   if(!midi || !layout.rows.length) return;
 
   const W = document.getElementById('scoreArea').clientWidth;
@@ -1177,14 +1482,11 @@ function stemDirection(dispMidi, hand){
 
 // Decide if a displayed midi pitch is accidental (sharp/flat) given current key signature
 function isAccidental(dispMidi, accMap){
+  // Simplified rule: always show # badge on black-key notes, regardless of
+  // key signature. The note letter is the white key BELOW (e.g., MIDI 70 = A#).
+  // This matches a learner's mental model: "see #, play black key to the right".
   const pc = ((dispMidi % 12) + 12) % 12;
-  const inKeySig = accMap.has(pc);
-  const isSharpPc = SHARP_PCS.has(pc);
-  // If pitch is black-key and not in key sig → needs accidental
-  // If pitch is white-key and in key sig → needs natural (we'll treat as accidental for now)
-  // Simple approach: show # for black keys not in a sharp-key-sig, show ♭ for black keys in flat-key-sig
-  if(isSharpPc && !inKeySig) return '#';
-  return null;
+  return SHARP_PCS.has(pc) ? '#' : null;
 }
 
 
@@ -1488,6 +1790,7 @@ function drawLedger(ctx,m,hand,rowY,noteX,noteW){
 // OVERLAY RENDER
 // ═══════════════════════════════════════════════════════════
 function renderOverlay(){
+  if(viewMode === 'waterfall'){ renderWaterfallOverlay(); return; }
   if(!midi || !layout.rows.length) return;
   const W = document.getElementById('scoreArea').clientWidth;
   const {first, last, offsetY, heightCss} = computeVirtRange();
@@ -1575,11 +1878,16 @@ function findOriginalNote(dn){
 // CURSOR & SEEK TOOLTIP
 // ═══════════════════════════════════════════════════════════
 function updateCursor(){
+  const c = document.getElementById('cursor');
+  if(viewMode === 'waterfall'){
+    c.style.display = 'none';
+    return;
+  }
+  c.style.display = '';
   if(!midi || !layout.measures.length) return;
   const curTick = timeToTicks(currentTime);
   const pos = tickToPos(curTick);
   if(!pos) return;
-  const c = document.getElementById('cursor');
   c.style.transform = `translate(${pos.x}px, ${pos.rowY - scrollOffset}px)`;
   c.style.height = systemVisualHeight() + 'px';
 }
@@ -1765,17 +2073,26 @@ function animate(ts){
 
   const setChanged = syncActiveNotes();
 
-  updateCursor();
+    updateCursor();
 
-  if(setChanged){
-    renderOverlay();
+  if(viewMode === 'waterfall'){
+    // Keep scrollOffset in sync so pause/scroll bar work correctly
+    scrollOffset = (timeToTicks(currentTime) / ppq) * pxPerBeat;
+    // Full re-render every frame (notes fall continuously)
+    renderWaterfall();
+    renderWaterfallOverlay();
     drawPiano(false);
+  } else {
+    if(setChanged){
+      renderOverlay();
+      drawPiano(false);
+    }
+    // Keep piano fresh for flash expiry
+    if(pianoFlashKeys.size>0) drawPiano(false);
+    smartAutoFollow();
   }
-  // Keep piano fresh for flash expiry
-  if(pianoFlashKeys.size>0) drawPiano(false);
 
   updateTimeDisplay();
-  smartAutoFollow();
   updatePerfHud();
   animId = requestAnimationFrame(animate);
 }
@@ -2284,28 +2601,35 @@ function gestureMove(clientX, clientY){
 
   if(!gesture.moved && dist > TAP_MAX_MOVEMENT){
     gesture.moved = true;
-    showSeekTooltip();
+    if(viewMode === 'score') showSeekTooltip();
   }
 
   if(gesture.moved){
-    const rect = scoreAreaEl.getBoundingClientRect();
     const now = performance.now();
     const dtMove = now - gesture.lastMoveTs;
 
-    if(gesture.type === 'touch'){
-      // iPad: scroll page by finger delta (playback keeps going freely)
+    if(viewMode === 'waterfall'){
+      // Waterfall: drag = scroll the score (which changes currentTime when paused)
       const deltaY = clientY - gesture.lastY;
+      // Scrolling DOWN (finger down) reveals what's below = future notes
+      // In our coord system: scrollOffset+ = later in time
       setScroll(scrollOffset - deltaY);
-      // Track velocity for momentum (px/ms)
-      if(dtMove > 0) gesture.velocityY = deltaY / dtMove;
-      // Cursor follows finger
-      const t = posToTime(clientX - rect.left, clientY - rect.top);
-      if(t !== null) seekTo(t, false);
+      if(dtMove > 0) gesture.velocityY = -deltaY / dtMove; // for momentum
       markUserScrolling();
     } else {
-      // Desktop: cursor follows mouse X/Y, page does NOT scroll
-      const t = posToTime(clientX - rect.left, clientY - rect.top);
-      if(t !== null) seekTo(t, false);
+      // Score mode: existing behavior
+      const rect = scoreAreaEl.getBoundingClientRect();
+      if(gesture.type === 'touch'){
+        const deltaY = clientY - gesture.lastY;
+        setScroll(scrollOffset - deltaY);
+        if(dtMove > 0) gesture.velocityY = deltaY / dtMove;
+        const t = posToTime(clientX - rect.left, clientY - rect.top);
+        if(t !== null) seekTo(t, false);
+        markUserScrolling();
+      } else {
+        const t = posToTime(clientX - rect.left, clientY - rect.top);
+        if(t !== null) seekTo(t, false);
+      }
     }
     gesture.lastMoveTs = now;
   }
@@ -2319,16 +2643,22 @@ function gestureEnd(){
   const wasTap = !gesture.moved && duration < TAP_MAX_DURATION_MS;
 
   if(wasTap){
-    if(isPlaying){
-      pausePlayback();
+    if(viewMode === 'waterfall'){
+      // Waterfall: tap = play/pause toggle (no seek-on-tap, simpler for kids)
+      if(isPlaying) pausePlayback();
+      else startPlayback();
     } else {
-      const rect = scoreAreaEl.getBoundingClientRect();
-      const t = posToTime(gesture.startX - rect.left, gesture.startY - rect.top);
-      if(t !== null) seekTo(t, false);
-      startPlayback();
+      // Score: existing behavior (seek to tap if not playing, then play)
+      if(isPlaying){
+        pausePlayback();
+      } else {
+        const rect = scoreAreaEl.getBoundingClientRect();
+        const t = posToTime(gesture.startX - rect.left, gesture.startY - rect.top);
+        if(t !== null) seekTo(t, false);
+        startPlayback();
+      }
     }
   } else if(gesture.moved && gesture.type === 'touch'){
-    // iPad: kick off momentum scroll with last velocity
     startMomentum(gesture.velocityY);
   }
 
@@ -2430,6 +2760,41 @@ document.getElementById('zoomSlider').addEventListener('change', ()=>{
 });
 
 document.getElementById('metroCheck').addEventListener('change',e=>{metronomeOn=e.target.checked;if(isPlaying){Tone.Transport.cancel();scheduledIds=[];scheduleAudio();}blurToolbar();});
+
+document.getElementById('btnViewMode').addEventListener('click', () => {
+  toggleViewMode();
+  blurToolbar();
+});
+
+function toggleViewMode(){
+  if(isPlaying) pausePlayback();
+  viewMode = (viewMode === 'score') ? 'waterfall' : 'score';
+  scrollOffset = 0;
+  document.body.classList.toggle('waterfall-mode', viewMode === 'waterfall');
+  const btn = document.getElementById('btnViewMode');
+  btn.textContent = (viewMode === 'score') ? '💧 Waterfall' : '🎼 Score';
+  // Hide/show score-only UI elements
+  document.getElementById('seekTooltip').style.display = (viewMode === 'waterfall') ? 'none' : '';
+  // Force re-render
+  if(midi){
+    if(viewMode === 'waterfall'){
+      buildPianoLayout();
+      // Sync scrollOffset to currentTime
+      scrollOffset = (timeToTicks(currentTime) / ppq) * pxPerBeat;
+      renderWaterfall();
+      renderWaterfallOverlay();
+    } else {
+      fullRebuild();
+    }
+  } else {
+    // No MIDI: just clear canvases
+    scoreCtx.clearRect(0, 0, scoreCanvas.width, scoreCanvas.height);
+    overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+  }
+  updateCursor();
+  updateScrollThumb();
+}
+
 document.getElementById('btnTracks').addEventListener('click',()=>{showTracks();blurToolbar();});
 document.getElementById('btnPrint').addEventListener('click',()=>{printScore();blurToolbar();});
 
