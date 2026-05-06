@@ -306,7 +306,7 @@ const L={CLEF_W:56,MARGIN_LEFT:24,MARGIN_RIGHT:24,LINE_GAP:11,NOTE_H:10,RADIUS:4
 // Note head (circle): diameter matches line gap like real engraving
 const HEAD_D = 12;              // note head diameter (px)
 const HEAD_R = HEAD_D / 2;
-const ACC_BADGE_SIZE = 11;      // # badge font size on note head (bigger)
+const ACC_BADGE_SIZE = 13;      // # badge font size on note head (bigger)
 const ACC_BADGE_DX = -HEAD_R -1 ;  // badge position — a few px right (closer to head)
 const ACC_BADGE_DY = -HEAD_R +3 ;  // badge position — a few px down (closer to head)
 // Stems & flags
@@ -2735,9 +2735,9 @@ function gestureMove(clientX, clientY){
   const dist = Math.abs(dx) + Math.abs(dy);
 
   if(!gesture.moved && dist > TAP_MAX_MOVEMENT){
-    gesture.moved = true;
-    if(viewMode === 'score') showSeekTooltip();
-  }
+  gesture.moved = true;
+  // if(viewMode === 'score') showSeekTooltip();  // hidden for now — uncomment to restore
+    }
 
   if(gesture.moved){
     const now = performance.now();
@@ -2779,11 +2779,11 @@ function gestureEnd(){
   if(wasTap){
     if(viewMode === 'waterfall'){
       // Waterfall: tap = play/pause toggle (no seek-on-tap, simpler for kids)
-      if(isPlaying) pausePlayback();
+      if(isPlaying || countInPending) pausePlayback();
       else startPlayback();
     } else {
       // Score: existing behavior (seek to tap if not playing, then play)
-      if(isPlaying){
+      if(isPlaying || countInPending){
         pausePlayback();
       } else {
         const rect = scoreAreaEl.getBoundingClientRect();
