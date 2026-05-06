@@ -84,11 +84,11 @@ body.waterfall-mode #scoreArea { order: 1; }
   box-shadow:0 0 10px rgba(233,69,96,.8); pointer-events:none;
   top:0; left:0; z-index:10;
   will-change: transform;
-  transition: box-shadow .15s;
+  transition: box-shadow .15s, opacity .15s;
 }
 #cursor.seeking {
-  background:#ff3366;
-  box-shadow:0 0 20px rgba(255,51,102,1), 0 0 6px rgba(255,255,255,0.8);
+  opacity: 0.4;
+  box-shadow: none;
 }
 
 #seekTooltip {
@@ -234,9 +234,11 @@ body.waterfall-mode #scoreArea { order: 1; }
     <span id="transposeVal">0</span>
     <button class="transpose-btn" id="btnTransUp">+</button>
   </div>
-    <div class="tg">
+      <div class="tg">
     <input type="checkbox" id="metroCheck">
     <label for="metroCheck">🔔</label>
+    <input type="checkbox" id="countInCheck">
+    <label for="countInCheck">⏱</label>
   </div>
     <div class="tg" id="trackChips"></div>
     <div class="tg">
@@ -343,6 +345,10 @@ function getPxPerBeat(){ return viewMode==='waterfall' ? pxPerBeatWaterfall : px
 let lastFrameTime=null,animId=null;
 let synths=[],scheduledIds=[];
 let metronomeOn=false,metroSynth=null;
+let countInOn=false;
+let countInTimerId=null;       // Tone.Transport schedule IDs for count-in clicks
+let countInPending=false;      // true while count-in is playing
+let countInStartTimerId=null;  // setTimeout id for the actual playback start
 let scrollOffset=0;
 let transpose=0;
 let songDisplayName='';
@@ -745,6 +751,7 @@ function scrollbarPointerDown(e){
   e.stopPropagation();
   stopMomentum();
   markUserScrolling();
+  if(viewMode === 'score') setCursorSeeking(true);
 }
 function scrollbarPointerMove(e){
   if(!sbDragging)return;const dy=(e.clientY||e.touches?.[0]?.clientY)-sbDragStartY;
@@ -753,7 +760,12 @@ function scrollbarPointerMove(e){
   if(pixelRange<=0)return;setScroll(sbDragStartScroll+(dy/pixelRange)*getMaxScroll());e.preventDefault();
   markUserScrolling();
 }
-function scrollbarPointerUp(){sbDragging=false;document.getElementById('scrollThumb').classList.remove('active');}
+
+function scrollbarPointerUp(){
+  sbDragging=false;
+  document.getElementById('scrollThumb').classList.remove('active');
+  if(viewMode === 'score') setCursorSeeking(false);
+}
 
 const scrollTrackEl=document.getElementById('scrollTrack');
 scrollTrackEl.addEventListener('mousedown',scrollbarPointerDown);
@@ -763,11 +775,20 @@ document.addEventListener('touchmove',e=>{if(sbDragging)scrollbarPointerMove(e);
 document.addEventListener('mouseup',scrollbarPointerUp);
 document.addEventListener('touchend',scrollbarPointerUp);
 
+let cursorFadeTimer = null;
+function flashCursorFade(){
+  setCursorSeeking(true);
+  if(cursorFadeTimer) clearTimeout(cursorFadeTimer);
+  cursorFadeTimer = setTimeout(()=>{ setCursorSeeking(false); cursorFadeTimer = null; }, 250);
+}
+
 document.getElementById('scoreArea').addEventListener('wheel',e=>{
   e.preventDefault();
   stopMomentum();
-  setScroll(scrollOffset+e.deltaY);
+  const delta = (viewMode === 'waterfall') ? -e.deltaY : e.deltaY;
+  setScroll(scrollOffset + delta);
   markUserScrolling();
+  if(viewMode === 'score') flashCursorFade();
 },{passive:false});
 
 // ═══════════════════════════════════════════════════════════
@@ -927,7 +948,12 @@ function posToTime(cx,cy){
     const rowTop=row.y, rowBot=row.y+systemVisualHeight();
     if(absY>=rowTop&&absY<rowBot){
       const xContent=cx-clefPanelWidth();
-      if(xContent<0) return null;
+      // Click in clef area → seek to start of this row's first measure
+      if(xContent<0){
+        const firstM = layout.measures[row.mStart];
+        if(firstM) return ticksToTime(firstM.startTick);
+        return null;
+      }
       for(let mi=row.mStart;mi<row.mEnd;mi++){
         const m=layout.measures[mi];if(!m)continue;
         if(xContent>=m.xInRow&&xContent<m.xInRow+m.width){
@@ -945,9 +971,13 @@ function posToTime(cx,cy){
     const d=Math.abs(absY-(row.y+systemVisualHeight()/2));
     if(d<bestDist){bestDist=d;bestRow=row;}
   }
-  if(bestRow){
+    if(bestRow){
     const xContent=cx-clefPanelWidth();
-    if(xContent<0) return null;
+    if(xContent<0){
+      const firstM = layout.measures[bestRow.mStart];
+      if(firstM) return ticksToTime(firstM.startTick);
+      return null;
+    }
     for(let mi=bestRow.mStart;mi<bestRow.mEnd;mi++){
       const m=layout.measures[mi];if(!m)continue;
       if(xContent>=m.xInRow&&xContent<m.xInRow+m.width){
@@ -1553,7 +1583,7 @@ function drawNoteHead(ctx, dn, accPos){
 
 // Draw a small # or ♭ badge on the top-left corner of a note head.
 // No more cascade / collision logic — the badge is part of the head.
-function drawAccidentalBadge(ctx, dn, sym){
+function drawAccidentalBadge(ctx, dn, sym, fillColor){
   const cx = dn.x + HEAD_R;
   const cy = dn.cy;
   const bx = cx + ACC_BADGE_DX;
@@ -1563,12 +1593,10 @@ function drawAccidentalBadge(ctx, dn, sym){
   ctx.font = `bold ${ACC_BADGE_SIZE}px serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  // Light halo for readability against any background
   ctx.lineWidth = 1.5;
   ctx.strokeStyle = '#fff';
   ctx.strokeText(symChar, bx, by);
-  // Dark fill
-  ctx.fillStyle = '#000';
+  ctx.fillStyle = fillColor || '#000';
   ctx.fillText(symChar, bx, by);
 }
 
@@ -1896,14 +1924,14 @@ function renderOverlay(){
           overlayCtx.strokeStyle = cl.activeBorder;
           overlayCtx.lineWidth = 1.5;
           overlayCtx.stroke();
-            overlayCtx.fillStyle = '#1a1a1a';
+        overlayCtx.fillStyle = '#1a1a1a';
           overlayCtx.font = `bold ${HEAD_D - 3}px sans-serif`;
           overlayCtx.textAlign = 'center';
           overlayCtx.textBaseline = 'middle';
           overlayCtx.fillText(noteName(dn.dispMidi).charAt(0), cx, cy + 0.5);
-          // Redraw sharp badge on top so it stays visible during active highlight
+          // Redraw sharp badge in active color (matches stroke color: dark orange / dark blue)
           const overlayAcc = isAccidental(dn.dispMidi, _overlayAccMap);
-          if(overlayAcc) drawAccidentalBadge(overlayCtx, dn, overlayAcc);
+          if(overlayAcc) drawAccidentalBadge(overlayCtx, dn, overlayAcc, cl.activeBorder);
         }
       }
 
@@ -2206,19 +2234,73 @@ async function startPlayback(){
   if(!midi)return;
   await Tone.start();
   if(!synths.length)initSynths();
-  // Make sure active-note state is consistent with currentTime before audio starts
   syncActiveNotes();
-  // Score-mode auto-scroll: if cursor is off-screen, scroll to bring it near top
   if(viewMode === 'score' && !isCursorVisible()){
     const pos = tickToPos(timeToTicks(currentTime));
     if(pos) setScroll(pos.rowY - 10);
   }
+  // Count-in: play X clicks at current tempo BEFORE actual playback
+  if(countInOn){
+    runCountInThenPlay();
+  } else {
+    actuallyStartPlayback();
+  }
+}
+
+function actuallyStartPlayback(){
   scheduleAudio();
   isPlaying=true;
   lastFrameTime=null;
   document.getElementById('btnPlay').textContent='⏸ Pause';
   document.getElementById('btnPlay').classList.add('active');
   animId=requestAnimationFrame(animate);
+}
+
+function runCountInThenPlay(){
+  initMetro();
+  const [bpM] = getTimeSig();
+  const bpm = bpmAtTime(currentTime);
+  const beatDurSec = (60 / bpm) / playbackSpeed;
+  countInPending = true;
+  // Visual: show play button as active even though we're not playing yet
+  document.getElementById('btnPlay').textContent='⏸ Pause';
+  document.getElementById('btnPlay').classList.add('active');
+  // Schedule beepBeats clicks via setTimeout (lightweight, easy to cancel)
+  const startMs = performance.now();
+  const clickTimers = [];
+  for(let i = 0; i < bpM; i++){
+    const t = i * beatDurSec * 1000;
+    const id = setTimeout(()=>{
+      if(!countInPending) return;
+      const downbeat = (i === 0);
+      metroSynth.volume.value = downbeat ? -6 : -14;
+      metroSynth.triggerAttackRelease('16n');
+    }, t);
+    clickTimers.push(id);
+  }
+  // After all clicks, start actual playback
+  const finalDelay = bpM * beatDurSec * 1000;
+  countInStartTimerId = setTimeout(()=>{
+    if(!countInPending) return;
+    countInPending = false;
+    countInStartTimerId = null;
+    actuallyStartPlayback();
+  }, finalDelay);
+  // Stash for cancel
+  countInTimerId = clickTimers;
+}
+
+function cancelCountIn(){
+  if(!countInPending) return;
+  countInPending = false;
+  if(Array.isArray(countInTimerId)){
+    for(const id of countInTimerId) clearTimeout(id);
+  }
+  countInTimerId = null;
+  if(countInStartTimerId){ clearTimeout(countInStartTimerId); countInStartTimerId = null; }
+  // Reset play button
+  document.getElementById('btnPlay').textContent='▶ Play';
+  document.getElementById('btnPlay').classList.remove('active');
 }
 
 function scheduleAudio(){
@@ -2251,12 +2333,14 @@ function scheduleAudio(){
 }
 
 function pausePlayback(){
+  if(countInPending){ cancelCountIn(); return; }
   isPlaying=false;Tone.Transport.pause();
   document.getElementById('btnPlay').textContent='▶ Play';
   document.getElementById('btnPlay').classList.remove('active');
   if(animId)cancelAnimationFrame(animId);
 }
 function stopPlayback(){
+  cancelCountIn();
   isPlaying=false;currentTime=0;Tone.Transport.stop();Tone.Transport.cancel();scheduledIds=[];
   document.getElementById('btnPlay').textContent='▶ Play';
   document.getElementById('btnPlay').classList.remove('active');
@@ -2269,7 +2353,12 @@ function stopPlayback(){
   updateCursor();
   updateTimeDisplay();
 }
-function togglePlay(){isPlaying?pausePlayback():startPlayback();}
+
+function togglePlay(){
+  if(countInPending){ cancelCountIn(); return; }
+  if(isPlaying) pausePlayback(); else startPlayback();
+}
+
 function seekTo(t, follow){
   currentTime = Math.max(0, Math.min(t, totalDuration));
   syncActiveNotes();
@@ -2654,18 +2743,12 @@ function gestureMove(clientX, clientY){
     const now = performance.now();
     const dtMove = now - gesture.lastMoveTs;
 
-    if(viewMode === 'waterfall'){
+        if(viewMode === 'waterfall'){
+      // Drag down = pull future down toward piano (currentTime↑)
+      // Same for touch and mouse
       const deltaY = clientY - gesture.lastY;
-      // Convention: finger DOWN (deltaY>0) → scrollOffset DECREASES → go BACK in time
-      //             finger UP   (deltaY<0) → scrollOffset INCREASES → go FORWARD in time
-      // Touch on iPad: invert this convention so finger DOWN goes FORWARD (notes "fall faster")
-      if(gesture.type === 'touch'){
-        setScroll(scrollOffset + deltaY);
-        if(dtMove > 0) gesture.velocityY = -deltaY / dtMove;
-      } else {
-        setScroll(scrollOffset - deltaY);
-        if(dtMove > 0) gesture.velocityY = deltaY / dtMove;
-      }
+      setScroll(scrollOffset + deltaY);
+      if(dtMove > 0) gesture.velocityY = -deltaY / dtMove;
       markUserScrolling();
     } else {
       // Score mode: existing behavior
@@ -2844,6 +2927,11 @@ function updateZoomSliderForMode(){
 }
 
 document.getElementById('metroCheck').addEventListener('change',e=>{metronomeOn=e.target.checked;if(isPlaying){Tone.Transport.cancel();scheduledIds=[];scheduleAudio();}blurToolbar();});
+
+document.getElementById('countInCheck').addEventListener('change', e => {
+  countInOn = e.target.checked;
+  blurToolbar();
+});
 
 document.getElementById('btnViewMode').addEventListener('click', () => {
   toggleViewMode();
