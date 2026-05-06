@@ -216,9 +216,9 @@ body.waterfall-mode #scoreArea { order: 1; }
     <button id="btnLoad">📂 Load</button>
     <input type="file" id="fileInput" accept=".mid,.midi">
   </div>
-  <div class="tg">
+    <div class="tg">
     <button id="btnPlay">▶ Play</button>
-    <button id="btnStop">⏹ Stop</button>
+    <button id="btnStop" style="display:none">⏹ Stop</button>
     <span id="timeDisplay">0:00 / 0:00</span>
   </div>
   <div class="tg">
@@ -234,14 +234,14 @@ body.waterfall-mode #scoreArea { order: 1; }
     <span id="transposeVal">0</span>
     <button class="transpose-btn" id="btnTransUp">+</button>
   </div>
-  <div class="tg">
+    <div class="tg">
     <input type="checkbox" id="metroCheck">
-    <label for="metroCheck">🔔 Metro</label>
+    <label for="metroCheck">🔔</label>
   </div>
     <div class="tg" id="trackChips"></div>
-  <div class="tg">
+    <div class="tg">
     <button id="btnViewMode">💧 Waterfall</button>
-    <button id="btnTracks">🎹 Tracks</button>
+    <button id="btnTracks" style="display:none">🎹 Tracks</button>
     <button id="btnPrint">🖨 Print</button>
   </div>
 </div>
@@ -336,7 +336,10 @@ function systemVisualHeight(){return L.ROW_PAD_T+systemHeight()+L.ROW_PAD_B;}
 // ═══════════════════════════════════════════════════════════
 let midi=null,allNotes=[],drawNotes=[],trackConfig=[];
 let totalDuration=0,currentTime=0;
-let isPlaying=false,playbackSpeed=1,pxPerBeat=60;
+let isPlaying=false,playbackSpeed=1;
+let pxPerBeatScore=60;          // for score view
+let pxPerBeatWaterfall=120;     // for waterfall view
+function getPxPerBeat(){ return viewMode==='waterfall' ? pxPerBeatWaterfall : pxPerBeatScore; }
 let lastFrameTime=null,animId=null;
 let synths=[],scheduledIds=[];
 let metronomeOn=false,metroSynth=null;
@@ -568,21 +571,21 @@ function getMaxScroll(){
   if(viewMode === 'waterfall'){
     // Max scroll = position corresponding to totalDuration
     const totalBeats = totalDuration > 0 ? timeToTicks(totalDuration) / ppq : 0;
-    return Math.max(0, totalBeats * pxPerBeat);
+    return Math.max(0, totalBeats * getPxPerBeat());
   }
   return Math.max(0, layout.totalHeight - getViewHeight());
 }
 
 function setScroll(val){
+  // In waterfall during playback: ignore manual scroll (auto-scroll only)
+  if(viewMode === 'waterfall' && isPlaying) return;
   const maxS = getMaxScroll();
   const newOffset = Math.max(0, Math.min(val, maxS));
   if(viewMode === 'waterfall'){
-    // In waterfall, scroll directly maps to currentTime.
-    // scrollOffset=0 → currentTime=0; scrollOffset=maxS → currentTime=totalDuration
     if(newOffset === scrollOffset) return;
     scrollOffset = newOffset;
     if(!isPlaying){
-      const beatsFromStart = scrollOffset / pxPerBeat;
+      const beatsFromStart = scrollOffset / getPxPerBeat();
       const newTime = Math.max(0, Math.min(ticksToTime(beatsFromStart * ppq), totalDuration));
       currentTime = newTime;
       syncActiveNotes();
@@ -775,7 +778,7 @@ function buildLayout(){
   const scoreW=document.getElementById('scoreArea').clientWidth;
   const contentW=scoreW-clefPanelWidth()-L.MARGIN_RIGHT-20;
   const [bpM] = getTimeSig();
-  const measW = bpM * pxPerBeat;
+  const measW = bpM * getPxPerBeat();
   const measPerRow = Math.max(1, Math.floor(contentW / measW));
   const actualMeasW = contentW / measPerRow;
 
@@ -995,7 +998,7 @@ function waterfallTotalHeight(){
   if(!midi) return 0;
   // Total height = totalDuration in beats × pxPerBeat
   const totalBeats = totalDuration > 0 ? timeToTicks(totalDuration) / ppq : 0;
-  return totalBeats * pxPerBeat;
+  return totalBeats * getPxPerBeat();
 }
 
 // Y position (in waterfall canvas coordinates) of a given time t.
@@ -1020,12 +1023,12 @@ function waterfallTotalHeight(){
 
 function waterfallTimeToY(t, viewH, currentT){
   const beatsAhead = (timeToTicks(t) - timeToTicks(currentT)) / ppq;
-  return viewH - beatsAhead * pxPerBeat;
+  return viewH - beatsAhead * getPxPerBeat();
 }
 
 // Get viewport-time at a Y in the canvas (used for seek).
 function waterfallYToTime(y, viewH, currentT){
-  const beatsAhead = (viewH - y) / pxPerBeat;
+  const beatsAhead = (viewH - y) / getPxPerBeat();
   const targetTicks = timeToTicks(currentT) + beatsAhead * ppq;
   return ticksToTime(targetTicks);
 }
@@ -1062,7 +1065,7 @@ function renderWaterfall(){
   const headTime = waterfallEffectiveTime();
 
   // Determine visible time range
-  const beatsInView = viewH / pxPerBeat;
+  const beatsInView = viewH / getPxPerBeat();
   const minTick = timeToTicks(headTime);
   const maxTick = minTick + beatsInView * ppq;
 
@@ -1199,7 +1202,7 @@ function renderWaterfallOverlay(){
   overlayCtx.clearRect(0, 0, W, viewH);
 
   const headTime = waterfallEffectiveTime();
-  const beatsInView = viewH / pxPerBeat;
+  const beatsInView = viewH / getPxPerBeat();
   const minTick = timeToTicks(headTime);
   const maxTick = minTick + beatsInView * ppq;
 
@@ -2077,7 +2080,7 @@ function animate(ts){
 
   if(viewMode === 'waterfall'){
     // Keep scrollOffset in sync so pause/scroll bar work correctly
-    scrollOffset = (timeToTicks(currentTime) / ppq) * pxPerBeat;
+    scrollOffset = (timeToTicks(currentTime) / ppq) * getPxPerBeat();
     // Full re-render every frame (notes fall continuously)
     renderWaterfall();
     renderWaterfallOverlay();
@@ -2162,8 +2165,10 @@ async function startPlayback(){
   if(!midi)return;
   await Tone.start();
   if(!synths.length)initSynths();
-  // If cursor is off-screen when user hits play, scroll so cursor's row is near top
-  if(!isCursorVisible()){
+  // Make sure active-note state is consistent with currentTime before audio starts
+  syncActiveNotes();
+  // Score-mode auto-scroll: if cursor is off-screen, scroll to bring it near top
+  if(viewMode === 'score' && !isCursorVisible()){
     const pos = tickToPos(timeToTicks(currentTime));
     if(pos) setScroll(pos.rowY - 10);
   }
@@ -2609,12 +2614,11 @@ function gestureMove(clientX, clientY){
     const dtMove = now - gesture.lastMoveTs;
 
     if(viewMode === 'waterfall'){
-      // Waterfall: drag = scroll the score (which changes currentTime when paused)
+      // Waterfall: drag = scroll the content (changes currentTime when paused)
+      // Finger UP (deltaY < 0) → content goes UP → see future (currentTime↑, scrollOffset↑)
       const deltaY = clientY - gesture.lastY;
-      // Scrolling DOWN (finger down) reveals what's below = future notes
-      // In our coord system: scrollOffset+ = later in time
       setScroll(scrollOffset - deltaY);
-      if(dtMove > 0) gesture.velocityY = -deltaY / dtMove; // for momentum
+      if(dtMove > 0) gesture.velocityY = deltaY / dtMove;
       markUserScrolling();
     } else {
       // Score mode: existing behavior
@@ -2741,9 +2745,23 @@ let zoomRafId = null;
 function applyZoomPending(){
   zoomRafId = null;
   if(zoomPendingValue === null) return;
-  pxPerBeat = zoomPendingValue;
+  if(viewMode === 'waterfall'){
+    pxPerBeatWaterfall = zoomPendingValue;
+  } else {
+    pxPerBeatScore = zoomPendingValue;
+  }
   zoomPendingValue = null;
-  if(midi) geometryRebuild();
+  if(midi){
+    if(viewMode === 'waterfall'){
+      // Sync scrollOffset to currentTime since pxPerBeat changed
+      scrollOffset = (timeToTicks(currentTime) / ppq) * getPxPerBeat();
+      renderWaterfall();
+      renderWaterfallOverlay();
+      updateScrollThumb();
+    } else {
+      geometryRebuild();
+    }
+  }
 }
 document.getElementById('zoomSlider').addEventListener('input', e=>{
   const v = +e.target.value;
@@ -2759,6 +2777,25 @@ document.getElementById('zoomSlider').addEventListener('change', ()=>{
   blurToolbar();
 });
 
+// Update slider's range/value to match current view mode
+function updateZoomSliderForMode(){
+  const slider = document.getElementById('zoomSlider');
+  const label = document.getElementById('zoomVal');
+  if(viewMode === 'waterfall'){
+    slider.min = '80';
+    slider.max = '200';
+    slider.step = '10';
+    slider.value = String(pxPerBeatWaterfall);
+    label.textContent = pxPerBeatWaterfall + ' px/b';
+  } else {
+    slider.min = '10';
+    slider.max = '120';
+    slider.step = '5';
+    slider.value = String(pxPerBeatScore);
+    label.textContent = pxPerBeatScore + ' px/b';
+  }
+}
+
 document.getElementById('metroCheck').addEventListener('change',e=>{metronomeOn=e.target.checked;if(isPlaying){Tone.Transport.cancel();scheduledIds=[];scheduleAudio();}blurToolbar();});
 
 document.getElementById('btnViewMode').addEventListener('click', () => {
@@ -2769,25 +2806,32 @@ document.getElementById('btnViewMode').addEventListener('click', () => {
 function toggleViewMode(){
   if(isPlaying) pausePlayback();
   viewMode = (viewMode === 'score') ? 'waterfall' : 'score';
-  scrollOffset = 0;
   document.body.classList.toggle('waterfall-mode', viewMode === 'waterfall');
   const btn = document.getElementById('btnViewMode');
   btn.textContent = (viewMode === 'score') ? '💧 Waterfall' : '🎼 Score';
-  // Hide/show score-only UI elements
   document.getElementById('seekTooltip').style.display = (viewMode === 'waterfall') ? 'none' : '';
-  // Force re-render
+  // Update zoom slider to match new mode
+  updateZoomSliderForMode();
   if(midi){
     if(viewMode === 'waterfall'){
       buildPianoLayout();
       // Sync scrollOffset to currentTime
-      scrollOffset = (timeToTicks(currentTime) / ppq) * pxPerBeat;
+      scrollOffset = (timeToTicks(currentTime) / ppq) * getPxPerBeat();
       renderWaterfall();
       renderWaterfallOverlay();
     } else {
       fullRebuild();
+      // Center the score view vertically on the cursor's row
+      const pos = tickToPos(timeToTicks(currentTime));
+      if(pos){
+        const viewH = getViewHeight();
+        const target = pos.rowY - viewH/2 + systemVisualHeight()/2;
+        scrollOffset = Math.max(0, Math.min(target, getMaxScroll()));
+        applyScroll();
+      }
     }
   } else {
-    // No MIDI: just clear canvases
+    scrollOffset = 0;
     scoreCtx.clearRect(0, 0, scoreCanvas.width, scoreCanvas.height);
     overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
   }
@@ -2836,6 +2880,7 @@ setTimeout(()=>{
   pianoCanvas.style.width=pa.clientWidth+'px';pianoCanvas.style.height=pa.clientHeight+'px';
   pianoCtx.setTransform(dpr,0,0,dpr,0,0);
   drawPiano(true);
+  updateZoomSliderForMode();
 },80);
 </script>
 </body>
