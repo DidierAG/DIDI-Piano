@@ -2277,12 +2277,44 @@ function attachOrigRefs(){
 // ═══════════════════════════════════════════════════════════
 // PLAYBACK
 // ═══════════════════════════════════════════════════════════
+const PIANO_SAMPLES = {
+  A0:'A0.mp3', C1:'C1.mp3', 'D#1':'Ds1.mp3', 'F#1':'Fs1.mp3',
+  A1:'A1.mp3', C2:'C2.mp3', 'D#2':'Ds2.mp3', 'F#2':'Fs2.mp3',
+  A2:'A2.mp3', C3:'C3.mp3', 'D#3':'Ds3.mp3', 'F#3':'Fs3.mp3',
+  A3:'A3.mp3', C4:'C4.mp3', 'D#4':'Ds4.mp3', 'F#4':'Fs4.mp3',
+  A4:'A4.mp3', C5:'C5.mp3', 'D#5':'Ds5.mp3', 'F#5':'Fs5.mp3',
+  A5:'A5.mp3', C6:'C6.mp3', 'D#6':'Ds6.mp3', 'F#6':'Fs6.mp3',
+  A6:'A6.mp3', C7:'C7.mp3', 'D#7':'Ds7.mp3', 'F#7':'Fs7.mp3',
+  A7:'A7.mp3', C8:'C8.mp3'
+};
+const PIANO_BASE_URL = 'https://tonejs.github.io/audio/salamander/';
+
+let synthsLoaded = false;
+
 function initSynths(){
-  synths=[];const types=['triangle8','sine4','square4','sawtooth4','triangle','sine'];
-  for(let i=0;i<Math.max(trackConfig.length,2);i++){
-    const s=new Tone.PolySynth(Tone.Synth,{maxPolyphony:32,options:{oscillator:{type:types[i%types.length]},envelope:{attack:.02,decay:.3,sustain:.4,release:.8}}}).toDestination();
-    s.volume.value=-8-i*2;synths.push(s);
+  synths = [];
+  const trackCount = Math.max(trackConfig.length, 2);
+  const loading = document.getElementById('loading');
+  loading.textContent = '🎹 Loading piano sounds…';
+  loading.style.display = 'block';
+  for(let i = 0; i < trackCount; i++){
+    const s = new Tone.Sampler({
+      urls: PIANO_SAMPLES,
+      baseUrl: PIANO_BASE_URL,
+      release: 1,
+    }).toDestination();
+    s.volume.value = -6 - i * 2;
+    synths.push(s);
   }
+  // Hide loading indicator once samples are ready
+  Tone.loaded().then(() => {
+    synthsLoaded = true;
+    loading.style.display = 'none';
+  }).catch(err => {
+    console.error('Failed to load piano samples:', err);
+    loading.textContent = '⚠️ Could not load piano sounds';
+    setTimeout(() => loading.style.display = 'none', 2000);
+  });
 }
 function initMetro(){if(metroSynth)return;metroSynth=new Tone.NoiseSynth({noise:{type:'white'},envelope:{attack:.001,decay:.04,sustain:0,release:.01}}).toDestination();metroSynth.volume.value=-10;}
 
