@@ -225,9 +225,13 @@ body.waterfall-mode #scoreArea { order: 1; }
     <input type="range" id="speedSlider" min=".5" max="1.5" step=".05" value="1">
     <span id="speedVal">1.0×</span>
   </div>
-  <div class="tg">
+    <div class="tg">
     <input type="range" id="zoomSlider" min="10" max="120" step="5" value="60">
     <span id="zoomVal">60 px/b</span>
+  </div>
+  <div class="tg">
+    <input type="range" id="scaleSlider" min="13" max="30" step="1" value="13">
+    <span id="scaleVal">13</span>
   </div>
   <div class="tg">
     <button class="transpose-btn" id="btnTransDown">−</button>
@@ -302,24 +306,73 @@ const TRACK_COLORS=[
   {bar:'#cc8833',barStroke:'#aa6622',active:'#eebb55',activeBorder:'#ddaa33',past:'rgba(204,136,51,.22)',text:'#fff',activeText:'#fff',label:'#aa6622',chip:'#cc8833'},
 ];
 
-const L={CLEF_W:56,MARGIN_LEFT:24,MARGIN_RIGHT:24,LINE_GAP:11,NOTE_H:10,RADIUS:4,ROW_PAD_T:30,STAFF_GAP:54,ROW_GAP:60,ROW_PAD_B:26};
-// Note head (circle): diameter matches line gap like real engraving
-const HEAD_D = 12;              // note head diameter (px)
-const HEAD_R = HEAD_D / 2;
-const ACC_BADGE_SIZE = 13;      // # badge font size on note head (bigger)
-const ACC_BADGE_DX = -HEAD_R -1 ;  // badge position — a few px right (closer to head)
-const ACC_BADGE_DY = -HEAD_R +3 ;  // badge position — a few px down (closer to head)
-// Stems & flags
-const STEM_LENGTH = L.LINE_GAP * 2.3;  // ~2 lines tall (shorter than engraving standard)
-const STEM_WIDTH = 1.2;
-const FLAG_WIDTH = 7;           // horizontal reach of a flag
-const FLAG_HEIGHT = 6;          // vertical size of a single flag
-const FLAG_SPACING = 4;         // vertical spacing between stacked flags
-// Beams
-const BEAM_THICKNESS = 3;       // thickness of a beam bar
-const BEAM_SPACING = 4;         // vertical gap between stacked beams
+// ─── BASE values at scale = 1.0 (smallest size) ───
+const L_BASE = {
+  CLEF_W:56, MARGIN_LEFT:24, MARGIN_RIGHT:24,
+  LINE_GAP:13, NOTE_H:12, RADIUS:4,
+  ROW_PAD_T:20, STAFF_GAP:60, ROW_GAP:60, ROW_PAD_B:20
+};
+const HEAD_D_BASE = 13;
+const ACC_BADGE_SIZE_BASE = 14;
+const ACC_BADGE_DX_BASE = -1;   // offset from head left edge (will be adjusted)
+const ACC_BADGE_DY_BASE = 0;
+const STEM_LENGTH_RATIO = 2.3;  // multiples of LINE_GAP
+const STEM_WIDTH_BASE = 1.2;
+const FLAG_WIDTH_BASE = 7;
+const FLAG_HEIGHT_BASE = 6;
+const FLAG_SPACING_BASE = 4;
+const BEAM_THICKNESS_BASE = 3;
+const BEAM_SPACING_BASE = 4;
+const TITLE_HEIGHT_BASE = 75;
+const PX_PER_BEAT_SCORE_BASE = 60;
 
-const TITLE_HEIGHT=75;
+// ─── LIVE values (recomputed by applyScoreScale) ───
+let L = {};
+let HEAD_D, HEAD_R, ACC_BADGE_SIZE, ACC_BADGE_DX, ACC_BADGE_DY;
+let STEM_LENGTH, STEM_WIDTH, FLAG_WIDTH, FLAG_HEIGHT, FLAG_SPACING;
+let BEAM_THICKNESS, BEAM_SPACING;
+let TITLE_HEIGHT;
+
+// Scale factor: 1.0 = smallest (LINE_GAP=13). User-facing range maps to LINE_GAP 13→30.
+let scoreScale = 1.0;
+
+function applyScoreScale(){
+  const s = scoreScale;
+  L = {
+    CLEF_W:       L_BASE.CLEF_W * s,
+    MARGIN_LEFT:  L_BASE.MARGIN_LEFT * s,
+    MARGIN_RIGHT: L_BASE.MARGIN_RIGHT * s,
+    LINE_GAP:     L_BASE.LINE_GAP * s,
+    NOTE_H:       L_BASE.NOTE_H * s,
+    RADIUS:       L_BASE.RADIUS * s,
+    ROW_PAD_T:    L_BASE.ROW_PAD_T * s,
+    STAFF_GAP:    L_BASE.STAFF_GAP * s,
+    ROW_GAP:      L_BASE.ROW_GAP * s,
+    ROW_PAD_B:    L_BASE.ROW_PAD_B * s,
+  };
+  HEAD_D = HEAD_D_BASE * s;
+  HEAD_R = HEAD_D / 2;
+  ACC_BADGE_SIZE = ACC_BADGE_SIZE_BASE * s;
+  ACC_BADGE_DX = -HEAD_R + ACC_BADGE_DX_BASE * s;
+  ACC_BADGE_DY = ACC_BADGE_DY_BASE * s;
+  STEM_LENGTH = L.LINE_GAP * STEM_LENGTH_RATIO;
+  STEM_WIDTH = STEM_WIDTH_BASE * s;
+  FLAG_WIDTH = FLAG_WIDTH_BASE * s;
+  FLAG_HEIGHT = FLAG_HEIGHT_BASE * s;
+  FLAG_SPACING = FLAG_SPACING_BASE * s;
+  BEAM_THICKNESS = BEAM_THICKNESS_BASE * s;
+  BEAM_SPACING = BEAM_SPACING_BASE * s;
+  TITLE_HEIGHT = TITLE_HEIGHT_BASE * s;
+}
+applyScoreScale();  // initialize live values
+
+// Scaled font helpers
+function fontMeasureNum() { return `bold ${9 * scoreScale}px sans-serif`; }
+function fontTempo()      { return `bold ${14 * scoreScale}px sans-serif`; }
+function fontTitle()      { return `bold ${20 * scoreScale}px "Segoe UI", sans-serif`; }
+function fontContinuation(){ return `bold ${8 * scoreScale}px sans-serif`; }
+function fontKeySig()     { return `${(L.LINE_GAP + 2)}px serif`; }
+function fontTimeSig()    { return `bold ${L.LINE_GAP * 1.5}px serif`; }
 
 const VIRT_BUFFER_ROWS = 2;
 const TAP_MAX_DURATION = 200;  // ms
@@ -339,7 +392,7 @@ function systemVisualHeight(){return L.ROW_PAD_T+systemHeight()+L.ROW_PAD_B;}
 let midi=null,allNotes=[],drawNotes=[],trackConfig=[];
 let totalDuration=0,currentTime=0;
 let isPlaying=false,playbackSpeed=1;
-let pxPerBeatScore=60;          // for score view
+let pxPerBeatScore = PX_PER_BEAT_SCORE_BASE;  // for score view (separate from scale)
 let pxPerBeatWaterfall=120;     // for waterfall view
 function getPxPerBeat(){ return viewMode==='waterfall' ? pxPerBeatWaterfall : pxPerBeatScore; }
 let lastFrameTime=null,animId=null;
@@ -1322,9 +1375,9 @@ function renderScore(){
   scoreCtx.fillStyle = '#fff';
   scoreCtx.fillRect(0, 0, W, heightCss);
 
-  if(first === 0 && songDisplayName){
+    if(first === 0 && songDisplayName){
     scoreCtx.fillStyle='#222';
-    scoreCtx.font='bold 20px "Segoe UI", sans-serif';
+    scoreCtx.font=fontTitle();
     scoreCtx.textAlign='center';
     scoreCtx.textBaseline='middle';
     scoreCtx.fillText(songDisplayName, W/2, TITLE_HEIGHT/2+2);
@@ -1401,13 +1454,13 @@ function drawBaseNote(ctx, dn, rowNotes, accMap){
     drawNoteHead(ctx, dn, null);
     const acc = isAccidental(dn.dispMidi, accMap);
     if(acc) drawAccidentalBadge(ctx, dn, acc);
-  } else if(dn.nW > 8){
+} else if(dn.nW > 8 * scoreScale){
     // Continuation marker on long continuation segments
     ctx.fillStyle = cl.barStroke;
-    ctx.font = 'bold 8px sans-serif';
+    ctx.font = fontContinuation();
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText('~', dn.x + 2, dn.cy + 0.5);
+    ctx.fillText('~', dn.x + 2 * scoreScale, dn.cy + 0.5);
   }
 }
 
@@ -1432,32 +1485,34 @@ function drawRow(ctx,row,W,acc){
   ctx.strokeStyle='#333';ctx.lineWidth=1.2;
   ctx.beginPath();ctx.moveTo(cpW,tT);ctx.lineTo(cpW,sysBot);ctx.stroke();
 
-  ctx.fillStyle='#222';
+    ctx.fillStyle='#222';
   ctx.font=`${L.LINE_GAP*4.2}px serif`;ctx.textBaseline='middle';
-  ctx.fillText('𝄞',L.MARGIN_LEFT+6,tT+2.2*L.LINE_GAP);
+  ctx.fillText('𝄞',L.MARGIN_LEFT+6*scoreScale,tT+2.2*L.LINE_GAP);
   ctx.font=`${L.LINE_GAP*3}px serif`;
-  ctx.fillText('𝄢',L.MARGIN_LEFT+7,bT+1.5*L.LINE_GAP);
+  ctx.fillText('𝄢',L.MARGIN_LEFT+7*scoreScale,bT+1.5*L.LINE_GAP);
 
-  let ksX=L.MARGIN_LEFT+30;
+  let ksX=L.MARGIN_LEFT+30*scoreScale;
+  const ksStep = 8 * scoreScale;
   if(acc.size>0){
-    ctx.font=`${L.LINE_GAP+2}px serif`;ctx.fillStyle='#222';ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.font=fontKeySig();ctx.fillStyle='#222';ctx.textAlign='center';ctx.textBaseline='middle';
     const tSY=[0,1.5,-.5,2,.5,2.5,1].map(f=>tT+f*L.LINE_GAP);
     const bSY=[1,2.5,.5,2,3.5,1.5,3].map(f=>bT+f*L.LINE_GAP);
     const tFY=[2,.5,2.5,1,3,1.5,3.5].map(f=>tT+f*L.LINE_GAP);
     const bFY=[2,3.5,2.5,1,3,1.5,3.5].map(f=>bT+f*L.LINE_GAP);
     let i=0;for(const[pc,type] of acc){
       const sym=type==='#'?'♯':'♭';
-      ctx.fillText(sym,ksX+i*8,type==='#'?tSY[i]:tFY[i]);
-      ctx.fillText(sym,ksX+i*8,type==='#'?bSY[i]:bFY[i]);i++;
+      ctx.fillText(sym,ksX+i*ksStep,type==='#'?tSY[i]:tFY[i]);
+      ctx.fillText(sym,ksX+i*ksStep,type==='#'?bSY[i]:bFY[i]);i++;
     }
-    ksX+=acc.size*8+3;
+    ksX+=acc.size*ksStep+3*scoreScale;
   }
 
   if(mStart===0&&layout.measures.length>0){
     const firstM=layout.measures[0];
-    ctx.font=`bold ${L.LINE_GAP*1.5}px serif`;ctx.fillStyle='#222';ctx.textAlign='center';ctx.textBaseline='middle';
-    ctx.fillText(firstM.beatsPerMeasure,ksX+6,tT+L.LINE_GAP);ctx.fillText(firstM.beatUnit,ksX+6,tT+3*L.LINE_GAP);
-    ctx.fillText(firstM.beatsPerMeasure,ksX+6,bT+L.LINE_GAP);ctx.fillText(firstM.beatUnit,ksX+6,bT+3*L.LINE_GAP);
+    ctx.font=fontTimeSig();ctx.fillStyle='#222';ctx.textAlign='center';ctx.textBaseline='middle';
+    const tsX = ksX+6*scoreScale;
+    ctx.fillText(firstM.beatsPerMeasure,tsX,tT+L.LINE_GAP);ctx.fillText(firstM.beatUnit,tsX,tT+3*L.LINE_GAP);
+    ctx.fillText(firstM.beatsPerMeasure,tsX,bT+L.LINE_GAP);ctx.fillText(firstM.beatUnit,tsX,bT+3*L.LINE_GAP);
   }
   ctx.textAlign='left';
 
@@ -1474,13 +1529,13 @@ function drawRow(ctx,row,W,acc){
       ctx.beginPath();ctx.moveTo(x,tT);ctx.lineTo(x,sysBot);ctx.stroke();
     }
     if(mi>0){
-      ctx.fillStyle='#999';ctx.font='bold 9px sans-serif';ctx.textAlign='center';ctx.textBaseline='bottom';
-      ctx.fillText(mi+1,x,tT-6);ctx.textAlign='left';
+      ctx.fillStyle='#999';ctx.font=fontMeasureNum();ctx.textAlign='center';ctx.textBaseline='bottom';
+      ctx.fillText(mi+1,x,tT-6*scoreScale);ctx.textAlign='left';
     }
     const showTempo=(mi===0)||(prevBpm!==null&&Math.abs(m.bpm-prevBpm)>0.5);
     if(showTempo){
-      ctx.fillStyle='#222';ctx.font='bold 14px sans-serif';ctx.textBaseline='bottom';
-      ctx.fillText(`♩= ${Math.round(m.bpm)}`,x+3,tT-7);
+      ctx.fillStyle='#222';ctx.font=fontTempo();ctx.textBaseline='bottom';
+      ctx.fillText(`♩= ${Math.round(m.bpm)}`,x+3*scoreScale,tT-7*scoreScale);
     }
     prevBpm=m.bpm;
     // Beat sub-lines drawn later (after notes) so they sit on top
@@ -1490,10 +1545,10 @@ function drawRow(ctx,row,W,acc){
   if(lastM){
     const xEnd=cpW+lastM.xInRow+lastM.width;
     const isFinal=(mEnd-1)>=measureMap.length-1;
-    if(isFinal){
+        if(isFinal){
       ctx.strokeStyle='#333';ctx.lineWidth=3;
       ctx.beginPath();ctx.moveTo(xEnd,tT);ctx.lineTo(xEnd,sysBot);ctx.stroke();
-      ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(xEnd-5,tT);ctx.lineTo(xEnd-5,sysBot);ctx.stroke();
+      ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(xEnd-5*scoreScale,tT);ctx.lineTo(xEnd-5*scoreScale,sysBot);ctx.stroke();
     } else {
       ctx.strokeStyle='#444';ctx.lineWidth=1.0;
       ctx.beginPath();ctx.moveTo(xEnd,tT);ctx.lineTo(xEnd,sysBot);ctx.stroke();
@@ -1851,7 +1906,7 @@ function drawLedger(ctx,m,hand,rowY,noteX,noteW){
   const sTop=hand==='right'?trebleTop(rowY):bassTop(rowY),sBot=sTop+staffHeight();
   const cy=noteY(m,hand,rowY);
   // Ledger spans the note head (not the duration bar) — centered on head
-  const lw = HEAD_D + 4;
+  const lw = HEAD_D + 4 * scoreScale;
   const lx = noteX + HEAD_R - lw/2;
   ctx.strokeStyle='#999';ctx.lineWidth=0.7;
   if(cy<sTop-L.LINE_GAP*0.4){for(let ly=sTop-L.LINE_GAP;ly>=cy-1;ly-=L.LINE_GAP){ctx.beginPath();ctx.moveTo(lx,ly);ctx.lineTo(lx+lw,ly);ctx.stroke();}}
@@ -1962,6 +2017,7 @@ function updateCursor(){
   if(!pos) return;
   c.style.transform = `translate(${pos.x}px, ${pos.rowY - scrollOffset}px)`;
   c.style.height = systemVisualHeight() + 'px';
+  c.style.width = (3 * scoreScale) + 'px';
 }
 
 function setCursorSeeking(on){
@@ -2461,6 +2517,10 @@ function printScore(){
   if(!midi)return alert('Load a MIDI file first.');
   const container=document.getElementById('printContainer');
   container.innerHTML='';
+  // Force scale = 1.0 for print so paper output is predictable
+  const _savedScale = scoreScale;
+  scoreScale = 1.0;
+  applyScoreScale();
 
   const PW=794,PH=1123;
   const PM={top:15,bottom:15,left:15,right:15};
@@ -2682,7 +2742,13 @@ function printScore(){
     ctx.fillText(`${pi+1} / ${totalPages}   —   ${songDisplayName}`,PW/2,PH-PM.bottom+FOOTER_H/2+2);ctx.textAlign='left';
     container.appendChild(canvas);
   }
-  setTimeout(()=>{window.print();},200);
+    setTimeout(()=>{
+    window.print();
+    // Restore on-screen scale
+    scoreScale = _savedScale;
+    applyScoreScale();
+    if(midi && viewMode === 'score') geometryRebuild();
+  }, 200);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -2883,16 +2949,28 @@ function applyZoomPending(){
   zoomPendingValue = null;
   if(midi){
     if(viewMode === 'waterfall'){
-      // Sync scrollOffset to currentTime since pxPerBeat changed
       scrollOffset = (timeToTicks(currentTime) / ppq) * getPxPerBeat();
       renderWaterfall();
       renderWaterfallOverlay();
       updateScrollThumb();
     } else {
       geometryRebuild();
+      recenterScrollOnCursor();
     }
   }
 }
+
+// Recenter the score scroll so the cursor sits roughly in the vertical
+// middle of the viewport. Used after layout changes (zoom or scale).
+function recenterScrollOnCursor(){
+  if(viewMode !== 'score' || !midi || !layout.measures.length) return;
+  const pos = tickToPos(timeToTicks(currentTime));
+  if(!pos) return;
+  const viewH = getViewHeight();
+  const target = pos.rowY - viewH/2 + systemVisualHeight()/2;
+  setScroll(target);
+}
+
 document.getElementById('zoomSlider').addEventListener('input', e=>{
   const v = +e.target.value;
   document.getElementById('zoomVal').textContent = v + ' px/b';
@@ -2903,6 +2981,41 @@ document.getElementById('zoomSlider').addEventListener('change', ()=>{
   if(zoomPendingValue !== null){
     if(zoomRafId) cancelAnimationFrame(zoomRafId);
     applyZoomPending();
+  }
+  blurToolbar();
+});
+// ─── Scale slider (LINE_GAP-based zoom) ───
+let scalePendingValue = null;
+let scaleRafId = null;
+function applyScalePending(){
+  scaleRafId = null;
+  if(scalePendingValue === null) return;
+  // scalePendingValue is the desired LINE_GAP (13 → 30)
+  scoreScale = scalePendingValue / L_BASE.LINE_GAP;
+  scalePendingValue = null;
+  applyScoreScale();
+  if(midi){
+    if(viewMode === 'waterfall'){
+      // Waterfall doesn't use score scale — but rebuild piano just in case
+      buildPianoLayout();
+      renderWaterfall();
+      renderWaterfallOverlay();
+    } else {
+      geometryRebuild();
+      recenterScrollOnCursor();
+    }
+  }
+}
+document.getElementById('scaleSlider').addEventListener('input', e => {
+  const v = +e.target.value;
+  document.getElementById('scaleVal').textContent = String(v);
+  scalePendingValue = v;
+  if(scaleRafId === null) scaleRafId = requestAnimationFrame(applyScalePending);
+});
+document.getElementById('scaleSlider').addEventListener('change', () => {
+  if(scalePendingValue !== null){
+    if(scaleRafId) cancelAnimationFrame(scaleRafId);
+    applyScalePending();
   }
   blurToolbar();
 });
