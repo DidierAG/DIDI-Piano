@@ -55,8 +55,8 @@ body.waterfall-mode #scoreArea { order: 1; }
   line-height:1;
 }
 .transpose-btn:hover { background:#533483 !important; }
-#transposeVal {
-  font-family:monospace; font-size:13px; color:#4fc3f7; min-width:32px; text-align:center;
+#transposeVal, .ctrl-val {
+  font-family:monospace; font-size:13px; color:#4fc3f7; min-width:42px; text-align:center;
 }
 
 #scoreArea {
@@ -189,6 +189,29 @@ body.waterfall-mode #scoreArea { order: 1; }
   border:1px solid #533483; padding:3px 7px; border-radius:4px; font-size:12px;
 }
 
+#btnMetro { background:#0f3460; color:#e0e0e0; border:1px solid #533483; padding:6px 13px; border-radius:6px; cursor:pointer; font-size:13px; }
+#btnMetro:hover { background:#533483; }
+#btnMetro.metro-active { background:#1a6b2a; border-color:#4dd97a; color:#4dd97a; }
+#btnMetro:disabled { opacity:0.4; cursor:default; }
+#btnMetroCfg { background:#0f3460; color:#e0e0e0; border:1px solid #533483; border-radius:6px; cursor:pointer; font-size:13px; }
+#btnMetroCfg:hover { background:#533483; }
+
+#metroCfgPopup {
+  display:none;
+  position:absolute;
+  top:calc(100% + 6px);
+  left:0;
+  background:#16213e;
+  border:1px solid #533483;
+  border-radius:8px;
+  padding:12px 14px;
+  z-index:200;
+  min-width:200px;
+  box-shadow:0 4px 16px rgba(0,0,0,0.4);
+  white-space:nowrap;
+}
+#metroCfgPopup.show { display:block; }
+
 #perfHud {
   position:fixed; bottom:4px; left:4px;
   background:rgba(0,0,0,0.6); color:#4fc3f7;
@@ -221,29 +244,52 @@ body.waterfall-mode #scoreArea { order: 1; }
     <button id="btnStop" style="display:none">⏹ Stop</button>
     <span id="timeDisplay">0:00 / 0:00</span>
   </div>
-  <div class="tg">
-    <input type="range" id="speedSlider" min=".5" max="1.5" step=".05" value="1">
-    <span id="speedVal">1.0×</span>
-  </div>
     <div class="tg">
-    <input type="range" id="zoomSlider" min="10" max="120" step="5" value="60">
-    <span id="zoomVal">60 px/b</span>
+    <button class="transpose-btn" id="btnSpeedDown">−</button>
+    <span class="ctrl-val" id="speedVal">×1.0</span>
+    <button class="transpose-btn" id="btnSpeedUp">+</button>
   </div>
   <div class="tg">
-    <input type="range" id="scaleSlider" min="13" max="30" step="1" value="13">
-    <span id="scaleVal">13</span>
+    <button class="transpose-btn" id="btnZoomDown">−</button>
+    <span class="ctrl-val" id="zoomVal">60px/b</span>
+    <button class="transpose-btn" id="btnZoomUp">+</button>
+  </div>
+  <div class="tg">
+    <button class="transpose-btn" id="btnScaleDown">−</button>
+    <span class="ctrl-val" id="scaleVal">13</span>
+    <button class="transpose-btn" id="btnScaleUp">+</button>
   </div>
   <div class="tg">
     <button class="transpose-btn" id="btnTransDown">−</button>
     <span id="transposeVal">0</span>
     <button class="transpose-btn" id="btnTransUp">+</button>
   </div>
-      <div class="tg">
+    
+    <div class="tg">
     <input type="checkbox" id="metroCheck">
     <label for="metroCheck">🔔</label>
     <input type="checkbox" id="countInCheck">
     <label for="countInCheck">⏱</label>
   </div>
+  <div class="tg" style="position:relative">
+    <button id="btnMetro" title="Standalone metronome (only when not playing)">🥁 Tick</button>
+    <button id="btnMetroCfg" title="Metronome tempo settings" style="padding:6px 7px">⚙️</button>
+    <div id="metroCfgPopup">
+      <div style="margin-bottom:8px;font-weight:bold;color:#4fc3f7;font-size:13px">Metronome tempo</div>
+      <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer">
+        <input type="radio" name="metroMode" id="metroModeAuto" value="auto" checked>
+        <span>Auto (follows score)</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="radio" name="metroMode" id="metroModeFixed" value="fixed">
+        <span>Fixed BPM:</span>
+        <input type="number" id="metroFixedBpm" min="20" max="300" value="120"
+          style="width:56px;background:#1a1a2e;color:#e0e0e0;border:1px solid #533483;
+                 border-radius:4px;padding:2px 5px;font-size:13px">
+      </label>
+    </div>
+  </div>
+
     <div class="tg" id="trackChips"></div>
     <div class="tg">
     <button id="btnViewMode">💧 Waterfall</button>
@@ -308,7 +354,7 @@ const TRACK_COLORS=[
 
 // ─── BASE values at scale = 1.0 (smallest size) ───
 const L_BASE = {
-  CLEF_W:56, MARGIN_LEFT:24, MARGIN_RIGHT:24,
+  CLEF_W:100, MARGIN_LEFT:24, MARGIN_RIGHT:24,
   LINE_GAP:13, NOTE_H:12, RADIUS:4,
   ROW_PAD_T:20, STAFF_GAP:60, ROW_GAP:60, ROW_PAD_B:20
 };
@@ -401,6 +447,12 @@ let metronomeOn=false,metroSynth=null;
 let countInOn=false;
 let countInTimerId=null;       // Tone.Transport schedule IDs for count-in clicks
 let countInPending=false;      // true while count-in is playing
+
+// Standalone metronome (practice mode — only when NOT playing)
+let standaloneMetroActive = false;
+let standaloneMetroFixed = false;   // false = auto (follows score BPM)
+let standaloneMetroFixedBpm = 120;
+let standaloneMetroTransportRunning = false;
 let countInStartTimerId=null;  // setTimeout id for the actual playback start
 let scrollOffset=0;
 let transpose=0;
@@ -2336,60 +2388,172 @@ async function startPlayback(){
 }
 
 function actuallyStartPlayback(){
+  // Stop standalone metronome if running — they don't coexist
+  if(standaloneMetroActive) stopStandaloneMetro();
   scheduleAudio();
   isPlaying=true;
   lastFrameTime=null;
   document.getElementById('btnPlay').textContent='⏸ Pause';
   document.getElementById('btnPlay').classList.add('active');
+  updateMetroBtn(); // disables the metro button
   animId=requestAnimationFrame(animate);
 }
 
 function runCountInThenPlay(){
   initMetro();
   const [bpM] = getTimeSig();
+  // If more than 4 beats in a measure, use half (e.g. 6/8 → 3 clicks)
+  const clickCount = bpM > 4 ? Math.ceil(bpM / 2) : bpM;
   const bpm = bpmAtTime(currentTime);
+  // Beat duration adjusted for playback speed
   const beatDurSec = (60 / bpm) / playbackSpeed;
+  const totalCountInSec = clickCount * beatDurSec;
+
   countInPending = true;
-  // Visual: show play button as active even though we're not playing yet
   document.getElementById('btnPlay').textContent='⏸ Pause';
   document.getElementById('btnPlay').classList.add('active');
-  // Schedule beepBeats clicks via setTimeout (lightweight, easy to cancel)
-  const startMs = performance.now();
-  const clickTimers = [];
-  for(let i = 0; i < bpM; i++){
-    const t = i * beatDurSec * 1000;
-    const id = setTimeout(()=>{
+
+  // Use Tone.Transport for sample-accurate scheduling (no drift)
+  Tone.Transport.cancel();
+  Tone.Transport.stop();
+  // Set transport BPM to current song BPM × speed
+  Tone.Transport.bpm.value = bpm * playbackSpeed;
+
+  const clickIds = [];
+  for(let i = 0; i < clickCount; i++){
+    const t = i * beatDurSec;
+    const id = Tone.Transport.schedule(time => {
       if(!countInPending) return;
-      const downbeat = (i === 0);
-      metroSynth.volume.value = downbeat ? -6 : -14;
-      metroSynth.triggerAttackRelease('16n');
+      metroSynth.volume.value = (i === 0) ? -6 : -14;
+      metroSynth.triggerAttackRelease('16n', time);
     }, t);
-    clickTimers.push(id);
+    clickIds.push(id);
   }
-  // After all clicks, start actual playback
-  const finalDelay = bpM * beatDurSec * 1000;
-  countInStartTimerId = setTimeout(()=>{
+
+  // Schedule the actual playback start
+  const startId = Tone.Transport.schedule(() => {
     if(!countInPending) return;
     countInPending = false;
     countInStartTimerId = null;
+    // Stop the count-in transport then hand off to actuallyStartPlayback
+    Tone.Transport.stop();
+    Tone.Transport.cancel();
     actuallyStartPlayback();
-  }, finalDelay);
-  // Stash for cancel
-  countInTimerId = clickTimers;
+  }, totalCountInSec);
+  clickIds.push(startId);
+
+  Tone.Transport.start();
+  countInTimerId = clickIds;
+  countInStartTimerId = null; // managed by Transport now
 }
 
 function cancelCountIn(){
   if(!countInPending) return;
   countInPending = false;
-  if(Array.isArray(countInTimerId)){
-    for(const id of countInTimerId) clearTimeout(id);
-  }
+  Tone.Transport.stop();
+  Tone.Transport.cancel();
   countInTimerId = null;
-  if(countInStartTimerId){ clearTimeout(countInStartTimerId); countInStartTimerId = null; }
-  // Reset play button
+  countInStartTimerId = null;
   document.getElementById('btnPlay').textContent='▶ Play';
   document.getElementById('btnPlay').classList.remove('active');
 }
+
+// ─── Standalone Metronome ────────────────────────────────
+function updateMetroBtn(){
+  const btn = document.getElementById('btnMetro');
+  const bpm = standaloneMetroFixed
+    ? standaloneMetroFixedBpm
+    : Math.round(bpmAtTime(currentTime));
+  const label = standaloneMetroFixed ? `🥁 Tick (${standaloneMetroFixedBpm})` : '🥁 Tick';
+  btn.textContent = label;
+  btn.classList.toggle('metro-active', standaloneMetroActive);
+  btn.disabled = isPlaying;
+}
+
+function startStandaloneMetro(){
+  if(isPlaying) return;
+  initMetro();
+  standaloneMetroActive = true;
+  updateMetroBtn();
+
+  const bpm = standaloneMetroFixed ? standaloneMetroFixedBpm : Math.round(bpmAtTime(currentTime));
+  const [bpM, bU] = getTimeSig();
+  const beatDurSec = 60 / bpm;
+
+  Tone.Transport.cancel();
+  Tone.Transport.stop();
+  Tone.Transport.bpm.value = bpm;
+
+  // Schedule a repeating beat pattern
+  let beatCount = 0;
+  Tone.Transport.scheduleRepeat(time => {
+    if(!standaloneMetroActive){ return; }
+    const isDown = (beatCount % bpM === 0);
+    metroSynth.volume.value = isDown ? -6 : -14;
+    metroSynth.triggerAttackRelease('16n', time);
+    beatCount++;
+  }, beatDurSec);
+
+  Tone.Transport.start();
+  standaloneMetroTransportRunning = true;
+}
+
+function stopStandaloneMetro(){
+  standaloneMetroActive = false;
+  if(standaloneMetroTransportRunning){
+    Tone.Transport.stop();
+    Tone.Transport.cancel();
+    standaloneMetroTransportRunning = false;
+  }
+  updateMetroBtn();
+}
+
+function toggleStandaloneMetro(){
+  if(isPlaying) return; // completely ignore while playing
+  if(standaloneMetroActive) stopStandaloneMetro();
+  else startStandaloneMetro();
+}
+
+// Wire up the metronome button
+document.getElementById('btnMetro').addEventListener('click', ()=>{
+  Tone.start().then(()=>{ toggleStandaloneMetro(); });
+  blurToolbar();
+});
+
+// Config popup toggle
+document.getElementById('btnMetroCfg').addEventListener('click', e=>{
+  const popup = document.getElementById('metroCfgPopup');
+  popup.classList.toggle('show');
+  e.stopPropagation();
+  blurToolbar();
+});
+
+// Close popup when clicking outside
+document.addEventListener('click', e=>{
+  if(!e.target.closest('#metroCfgPopup') && !e.target.closest('#btnMetroCfg')){
+    document.getElementById('metroCfgPopup').classList.remove('show');
+  }
+});
+
+// Radio: auto vs fixed
+document.querySelectorAll('input[name="metroMode"]').forEach(r=>{
+  r.addEventListener('change', ()=>{
+    standaloneMetroFixed = (document.getElementById('metroModeFixed').checked);
+    // If metro is running, restart with new tempo
+    if(standaloneMetroActive){ stopStandaloneMetro(); startStandaloneMetro(); }
+    updateMetroBtn();
+  });
+});
+
+// Fixed BPM input
+document.getElementById('metroFixedBpm').addEventListener('input', e=>{
+  const v = Math.max(20, Math.min(300, +e.target.value || 120));
+  standaloneMetroFixedBpm = v;
+  if(standaloneMetroActive && standaloneMetroFixed){
+    stopStandaloneMetro(); startStandaloneMetro();
+  }
+  updateMetroBtn();
+});
 
 function scheduleAudio(){
   Tone.Transport.cancel();Tone.Transport.stop();scheduledIds=[];
@@ -2426,6 +2590,7 @@ function pausePlayback(){
   document.getElementById('btnPlay').textContent='▶ Play';
   document.getElementById('btnPlay').classList.remove('active');
   if(animId)cancelAnimationFrame(animId);
+  updateMetroBtn(); // re-enables metro button
 }
 function stopPlayback(){
   cancelCountIn();
@@ -2440,6 +2605,7 @@ function stopPlayback(){
   drawPiano(true);
   updateCursor();
   updateTimeDisplay();
+  updateMetroBtn(); // re-enables metro button
 }
 
 function togglePlay(){
@@ -2965,20 +3131,16 @@ document.getElementById('btnLoad').addEventListener('click',()=>{document.getEle
 document.getElementById('fileInput').addEventListener('change',e=>{if(e.target.files.length)loadFile(e.target.files[0]);});
 document.getElementById('btnPlay').addEventListener('click',()=>{togglePlay();blurToolbar();});
 document.getElementById('btnStop').addEventListener('click',()=>{stopPlayback();blurToolbar();});
-document.getElementById('speedSlider').addEventListener('input',e=>{playbackSpeed=+e.target.value;document.getElementById('speedVal').textContent=playbackSpeed.toFixed(2)+'×';if(isPlaying){Tone.Transport.cancel();scheduledIds=[];scheduleAudio();}});
-document.getElementById('speedSlider').addEventListener('change',blurToolbar);
+function setSpeed(val){
+  playbackSpeed = Math.round(Math.max(0.5, Math.min(1.5, val)) * 10) / 10;
+  document.getElementById('speedVal').textContent = '×' + playbackSpeed.toFixed(1);
+  if(isPlaying){ Tone.Transport.cancel(); scheduledIds=[]; scheduleAudio(); }
+}
+document.getElementById('btnSpeedDown').addEventListener('click', ()=>{ setSpeed(playbackSpeed - 0.1); blurToolbar(); });
+document.getElementById('btnSpeedUp').addEventListener('click',   ()=>{ setSpeed(playbackSpeed + 0.1); blurToolbar(); });
 
-let zoomPendingValue = null;
-let zoomRafId = null;
-function applyZoomPending(){
-  zoomRafId = null;
-  if(zoomPendingValue === null) return;
-  if(viewMode === 'waterfall'){
-    pxPerBeatWaterfall = zoomPendingValue;
-  } else {
-    pxPerBeatScore = zoomPendingValue;
-  }
-  zoomPendingValue = null;
+
+function applyZoom(){
   if(midi){
     if(viewMode === 'waterfall'){
       scrollOffset = (timeToTicks(currentTime) / ppq) * getPxPerBeat();
@@ -2992,6 +3154,20 @@ function applyZoomPending(){
   }
 }
 
+function setZoom(val){
+  const v = Math.max(10, Math.min(120, Math.round(val)));
+  if(viewMode === 'waterfall'){
+    pxPerBeatWaterfall = v;
+  } else {
+    pxPerBeatScore = v;
+  }
+  document.getElementById('zoomVal').textContent = v + 'px/b';
+  applyZoom();
+}
+
+document.getElementById('btnZoomDown').addEventListener('click', ()=>{ setZoom(getPxPerBeat() - 5); blurToolbar(); });
+document.getElementById('btnZoomUp').addEventListener('click',   ()=>{ setZoom(getPxPerBeat() + 5); blurToolbar(); });
+
 // Recenter the score scroll so the cursor sits roughly in the vertical
 // middle of the viewport. Used after layout changes (zoom or scale).
 function recenterScrollOnCursor(){
@@ -3003,32 +3179,15 @@ function recenterScrollOnCursor(){
   setScroll(target);
 }
 
-document.getElementById('zoomSlider').addEventListener('input', e=>{
-  const v = +e.target.value;
-  document.getElementById('zoomVal').textContent = v + ' px/b';
-  zoomPendingValue = v;
-  if(zoomRafId === null) zoomRafId = requestAnimationFrame(applyZoomPending);
-});
-document.getElementById('zoomSlider').addEventListener('change', ()=>{
-  if(zoomPendingValue !== null){
-    if(zoomRafId) cancelAnimationFrame(zoomRafId);
-    applyZoomPending();
-  }
-  blurToolbar();
-});
-// ─── Scale slider (LINE_GAP-based zoom) ───
-let scalePendingValue = null;
-let scaleRafId = null;
-function applyScalePending(){
-  scaleRafId = null;
-  if(scalePendingValue === null) return;
-  // scalePendingValue is the desired LINE_GAP (13 → 30)
-  scoreScale = scalePendingValue / L_BASE.LINE_GAP;
-  scalePendingValue = null;
+
+
+function setScale(lineGapVal){
+  const v = Math.max(10, Math.min(25, Math.round(lineGapVal)));
+  scoreScale = v / L_BASE.LINE_GAP;
+  document.getElementById('scaleVal').textContent = String(v);
   applyScoreScale();
   if(midi){
     if(viewMode === 'waterfall'){
-      // Waterfall doesn't use score scale — but rebuild piano just in case
       buildPianoLayout();
       renderWaterfall();
       renderWaterfallOverlay();
@@ -3038,38 +3197,12 @@ function applyScalePending(){
     }
   }
 }
-document.getElementById('scaleSlider').addEventListener('input', e => {
-  const v = +e.target.value;
-  document.getElementById('scaleVal').textContent = String(v);
-  scalePendingValue = v;
-  if(scaleRafId === null) scaleRafId = requestAnimationFrame(applyScalePending);
-});
-document.getElementById('scaleSlider').addEventListener('change', () => {
-  if(scalePendingValue !== null){
-    if(scaleRafId) cancelAnimationFrame(scaleRafId);
-    applyScalePending();
-  }
-  blurToolbar();
-});
 
-// Update slider's range/value to match current view mode
-function updateZoomSliderForMode(){
-  const slider = document.getElementById('zoomSlider');
-  const label = document.getElementById('zoomVal');
-  if(viewMode === 'waterfall'){
-    slider.min = '80';
-    slider.max = '200';
-    slider.step = '10';
-    slider.value = String(pxPerBeatWaterfall);
-    label.textContent = pxPerBeatWaterfall + ' px/b';
-  } else {
-    slider.min = '10';
-    slider.max = '120';
-    slider.step = '5';
-    slider.value = String(pxPerBeatScore);
-    label.textContent = pxPerBeatScore + ' px/b';
-  }
-}
+document.getElementById('btnScaleDown').addEventListener('click', ()=>{ setScale(Math.round(L.LINE_GAP) - 1); blurToolbar(); });
+document.getElementById('btnScaleUp').addEventListener('click',   ()=>{ setScale(Math.round(L.LINE_GAP) + 1); blurToolbar(); });
+
+
+
 
 document.getElementById('metroCheck').addEventListener('change',e=>{metronomeOn=e.target.checked;if(isPlaying){Tone.Transport.cancel();scheduledIds=[];scheduleAudio();}blurToolbar();});
 
@@ -3090,8 +3223,7 @@ function toggleViewMode(){
   const btn = document.getElementById('btnViewMode');
   btn.textContent = (viewMode === 'score') ? '💧 Waterfall' : '🎼 Score';
   document.getElementById('seekTooltip').style.display = (viewMode === 'waterfall') ? 'none' : '';
-  // Update zoom slider to match new mode
-  updateZoomSliderForMode();
+
   if(midi){
     if(viewMode === 'waterfall'){
       buildPianoLayout();
@@ -3160,7 +3292,6 @@ setTimeout(()=>{
   pianoCanvas.style.width=pa.clientWidth+'px';pianoCanvas.style.height=pa.clientHeight+'px';
   pianoCtx.setTransform(dpr,0,0,dpr,0,0);
   drawPiano(true);
-  updateZoomSliderForMode();
 },80);
 </script>
 </body>
