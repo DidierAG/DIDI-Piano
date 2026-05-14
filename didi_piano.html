@@ -568,6 +568,37 @@ function getKeySig(){
   return ks?.length?ks[0]:{key:'C',scale:'major'};
 }
 
+// Compound meter: 6/8, 9/8, 12/8 etc.
+// These are felt as 2/3/4 beats of 3 sub-beats each.
+function isCompoundMeter(){
+  const [bpM, bU] = getTimeSig();
+  return bU === 8 && bpM % 3 === 0 && bpM > 3;
+}
+// Number of FELT beats per measure in compound meter
+function compoundBeatsPerMeasure(){
+  return getTimeSig()[0] / 3;
+}
+// Ticks per felt beat in compound meter (3 eighth notes)
+function ticksPerFeltBeat(){
+  if(isCompoundMeter()){
+    // 3 eighth notes = 3 * (ppq/2) ticks
+    return ppq * 3 / 2;
+  }
+  // Simple meter: 1 quarter note = ppq ticks
+  return ppq;
+}
+// Convert stored quarter-note BPM to display BPM
+// In 6/8: quarter BPM 120 → dotted-quarter BPM 80
+function displayBpm(qBpm){
+  if(isCompoundMeter()) return Math.round(qBpm / 1.5);
+  return Math.round(qBpm);
+}
+// Tempo marking symbol for display
+function tempoSymbol(){
+  if(isCompoundMeter()) return '♩.';
+  return '♩';
+}
+
 function buildMeasureMap(){
   measureMap=[];
   const[bpM,bU]=getTimeSig();
@@ -1269,7 +1300,7 @@ function renderWaterfall(){
           scoreCtx.font = 'bold 12px sans-serif';
           scoreCtx.textAlign = 'left';
           scoreCtx.textBaseline = 'bottom';
-          scoreCtx.fillText(`♩= ${Math.round(m.bpm)}`, 8, labelY);
+          scoreCtx.fillText(`${tempoSymbol()}= ${displayBpm(m.bpm)}`, 8, labelY);
           labelY -= 14;
         }
         // Bar number (skip on the very first measure of the song — we know it's "1")
@@ -1587,7 +1618,7 @@ function drawRow(ctx,row,W,acc){
     const showTempo=(mi===0)||(prevBpm!==null&&Math.abs(m.bpm-prevBpm)>0.5);
     if(showTempo){
       ctx.fillStyle='#222';ctx.font=fontTempo();ctx.textBaseline='bottom';
-      ctx.fillText(`♩= ${Math.round(m.bpm)}`,x+3*scoreScale,tT-7*scoreScale);
+      ctx.fillText(`${tempoSymbol()}= ${displayBpm(m.bpm)}`,x+3*scoreScale,tT-7*scoreScale);
     }
     prevBpm=m.bpm;
     // Beat sub-lines drawn later (after notes) so they sit on top
@@ -2279,8 +2310,10 @@ function animate(ts){
 
 function updateTimeDisplay(){
   const f=s=>`${Math.floor(s/60)}:${Math.floor(s%60).toString().padStart(2,'0')}`;
-  const currentBpm=Math.round(bpmAtTime(currentTime));
-  document.getElementById('timeDisplay').textContent=`${f(currentTime)} / ${f(totalDuration)}  ♩${currentBpm}`;
+  const rawBpm = bpmAtTime(currentTime);
+  const dBpm = displayBpm(rawBpm);
+  const sym = tempoSymbol();
+  document.getElementById('timeDisplay').textContent=`${f(currentTime)} / ${f(totalDuration)}  ${sym}=${dBpm}`;
 }
 
 function fullRebuild(){
@@ -2401,12 +2434,18 @@ function actuallyStartPlayback(){
 
 function runCountInThenPlay(){
   initMetro();
+    const compound = isCompoundMeter();
   const [bpM] = getTimeSig();
-  // If more than 4 beats in a measure, use half (e.g. 6/8 → 3 clicks)
-  const clickCount = bpM > 4 ? Math.ceil(bpM / 2) : bpM;
+  // Compound meter: click on felt beats (6/8 → 2 clicks, 9/8 → 3, 12/8 → 4)
+  // Simple meter: if >4 beats use half, otherwise full
+  const clickCount = compound
+    ? compoundBeatsPerMeasure()
+    : bpM > 4 ? Math.ceil(bpM / 2) : bpM;
   const bpm = bpmAtTime(currentTime);
-  // Beat duration adjusted for playback speed
-  const beatDurSec = (60 / bpm) / playbackSpeed;
+  // Beat duration: in compound, felt beat = dotted quarter = 1.5 × quarter
+  const beatDurSec = compound
+    ? (60 / bpm) * 1.5 / playbackSpeed
+    : (60 / bpm) / playbackSpeed;
   const totalCountInSec = clickCount * beatDurSec;
 
   countInPending = true;
@@ -2476,19 +2515,36 @@ function startStandaloneMetro(){
   standaloneMetroActive = true;
   updateMetroBtn();
 
-  const bpm = standaloneMetroFixed ? standaloneMetroFixedBpm : Math.round(bpmAtTime(currentTime));
-  const [bpM, bU] = getTimeSig();
-  const beatDurSec = 60 / bpm;
+  // In compound meter: use dotted-quarter BPM for felt beats
+  // In simple meter: use quarter-note BPM directly
+  const compound = isCompoundMeter();
+  const rawBpm = standaloneMetroFixed
+    ? standaloneMetroFixedBpm
+    : Math.round(bpmAtTime(currentTime));
+
+  // For compound: the user sees/sets dotted-quarter BPM (e.g. 80)
+  // Transport runs in quarter notes, so convert back:
+  // dotted-quarter BPM → quarter BPM = dotted × 1.5
+  const transportBpm = (compound && !standaloneMetroFixed)
+    ? rawBpm  // rawBpm is already quarter BPM from the MIDI
+    : standaloneMetroFixed && compound
+      ? rawBpm * 1.5  // user typed dotted-quarter BPM, convert to quarter
+      : rawBpm;
+
+  // Felt beat interval in seconds
+  const feltBeatsPerMeasure = compound ? compoundBeatsPerMeasure() : getTimeSig()[0];
+  const beatDurSec = compound
+    ? (60 / rawBpm) * 1.5   // dotted quarter duration at quarter BPM
+    : 60 / rawBpm;
 
   Tone.Transport.cancel();
   Tone.Transport.stop();
-  Tone.Transport.bpm.value = bpm;
+  Tone.Transport.bpm.value = transportBpm;
 
-  // Schedule a repeating beat pattern
   let beatCount = 0;
   Tone.Transport.scheduleRepeat(time => {
-    if(!standaloneMetroActive){ return; }
-    const isDown = (beatCount % bpM === 0);
+    if(!standaloneMetroActive) return;
+    const isDown = (beatCount % feltBeatsPerMeasure === 0);
     metroSynth.volume.value = isDown ? -6 : -14;
     metroSynth.triggerAttackRelease('16n', time);
     beatCount++;
@@ -2564,20 +2620,25 @@ function scheduleAudio(){
     const dur=note.duration/playbackSpeed;
     scheduledIds.push(Tone.Transport.schedule(t=>{synths[synthIdx].triggerAttackRelease(freq,Math.max(dur,.04),t,note.velocity);},Math.max(offset,0)));
   }
-  if(metronomeOn){
+    if(metronomeOn){
     initMetro();
+    const compound = isCompoundMeter();
     for(const meas of measureMap){
-      for(let b=0;b<meas.beatsPerMeasure;b++){
-        const beatTime=meas.startTime+b*(meas.endTime-meas.startTime)/meas.beatsPerMeasure;
-        const off=(beatTime-currentTime)/playbackSpeed;
-        if(off<-0.01)continue;
-        if(beatTime>totalDuration+1)break;
-        const down=b===0;
+      // In compound meter: beat on every group of 3 eighth notes
+      // In simple meter: beat on every quarter note beat
+      const feltBeats = compound ? compoundBeatsPerMeasure() : meas.beatsPerMeasure;
+      const measDur = meas.endTime - meas.startTime;
+      for(let b = 0; b < feltBeats; b++){
+        const beatTime = meas.startTime + b * (measDur / feltBeats);
+        const off = (beatTime - currentTime) / playbackSpeed;
+        if(off < -0.01) continue;
+        if(beatTime > totalDuration + 1) break;
+        const down = b === 0;
         scheduledIds.push(Tone.Transport.schedule(t=>{
-          if(!metronomeOn)return;
-          metroSynth.volume.value=down?-6:-14;
-          metroSynth.triggerAttackRelease('16n',t);
-        },Math.max(off,0)));
+          if(!metronomeOn) return;
+          metroSynth.volume.value = down ? -6 : -14;
+          metroSynth.triggerAttackRelease('16n', t);
+        }, Math.max(off, 0)));
       }
     }
   }
@@ -2854,7 +2915,7 @@ function printScore(){
         if(m.index>pRow.mStart){ctx.strokeStyle='#444';ctx.lineWidth=1.0;ctx.beginPath();ctx.moveTo(x,tT);ctx.lineTo(x,sysBot);ctx.stroke();}
         if(m.index>0){ctx.fillStyle='#999';ctx.font='bold 9px sans-serif';ctx.textAlign='center';ctx.textBaseline='bottom';ctx.fillText(m.index+1,x,tT-6);ctx.textAlign='left';}
         const showTempo=(m.index===0)||(prevBpm!==null&&Math.abs(m.bpm-prevBpm)>0.5);
-        if(showTempo){ctx.fillStyle='#222';ctx.font='bold 14px sans-serif';ctx.textBaseline='bottom';ctx.fillText(`♩= ${Math.round(m.bpm)}`,x+3,tT-7);}
+        if(showTempo){ctx.fillStyle='#222';ctx.font='bold 14px sans-serif';ctx.textBaseline='bottom';ctx.fillText(`${tempoSymbol()}= ${displayBpm(m.bpm)}`,x+3,tT-7);}
         prevBpm=m.bpm;
         
       }
