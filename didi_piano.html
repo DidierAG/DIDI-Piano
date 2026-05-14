@@ -2522,20 +2522,20 @@ function startStandaloneMetro(){
     ? standaloneMetroFixedBpm
     : Math.round(bpmAtTime(currentTime));
 
-  // For compound: the user sees/sets dotted-quarter BPM (e.g. 80)
-  // Transport runs in quarter notes, so convert back:
-  // dotted-quarter BPM → quarter BPM = dotted × 1.5
-  const transportBpm = (compound && !standaloneMetroFixed)
-    ? rawBpm  // rawBpm is already quarter BPM from the MIDI
-    : standaloneMetroFixed && compound
-      ? rawBpm * 1.5  // user typed dotted-quarter BPM, convert to quarter
-      : rawBpm;
+    // Apply playback speed only in auto mode (fixed BPM ignores speed)
+  const effectiveSpeed = standaloneMetroFixed ? 1.0 : playbackSpeed;
 
-  // Felt beat interval in seconds
+  const transportBpm = (compound && !standaloneMetroFixed)
+    ? rawBpm * effectiveSpeed
+    : standaloneMetroFixed && compound
+      ? rawBpm * 1.5
+      : rawBpm * effectiveSpeed;
+
+  // Felt beat interval in seconds (speed-adjusted)
   const feltBeatsPerMeasure = compound ? compoundBeatsPerMeasure() : getTimeSig()[0];
   const beatDurSec = compound
-    ? (60 / rawBpm) * 1.5   // dotted quarter duration at quarter BPM
-    : 60 / rawBpm;
+    ? (60 / rawBpm) * 1.5 / effectiveSpeed
+    : (60 / rawBpm) / effectiveSpeed;
 
   Tone.Transport.cancel();
   Tone.Transport.stop();
@@ -3196,6 +3196,11 @@ function setSpeed(val){
   playbackSpeed = Math.round(Math.max(0.5, Math.min(1.5, val)) * 10) / 10;
   document.getElementById('speedVal').textContent = '×' + playbackSpeed.toFixed(1);
   if(isPlaying){ Tone.Transport.cancel(); scheduledIds=[]; scheduleAudio(); }
+  // Restart standalone metro in auto mode so it picks up the new speed
+  if(standaloneMetroActive && !standaloneMetroFixed){
+    stopStandaloneMetro();
+    startStandaloneMetro();
+  }
 }
 document.getElementById('btnSpeedDown').addEventListener('click', ()=>{ setSpeed(playbackSpeed - 0.1); blurToolbar(); });
 document.getElementById('btnSpeedUp').addEventListener('click',   ()=>{ setSpeed(playbackSpeed + 0.1); blurToolbar(); });
