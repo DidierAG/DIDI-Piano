@@ -559,51 +559,47 @@ function timeToTicks(t){
 function bpmAtTime(t){ return tempoMap[bsearchTempoByTime(t)].bpm; }
 function bpmAtTick(tk){ return tempoMap[bsearchTempoByTick(tk)].bpm; }
 
-function getTimeSig(){
-  const ts=midi?.header?.timeSignatures;
-  return ts?.length&&ts[0].timeSignature?ts[0].timeSignature:[4,4];
+function getTimeSig(tick){
+  if(tick !== undefined && timeSigMap.length){
+    const ts = timeSigAtTick(tick);
+    return [ts.numerator, ts.denominator];
+  }
+  // Fallback: first time sig
+  if(timeSigMap.length) return [timeSigMap[0].numerator, timeSigMap[0].denominator];
+  const ts = midi?.header?.timeSignatures;
+  return ts?.length && ts[0].timeSignature ? ts[0].timeSignature : [4,4];
 }
+
 function getKeySig(){
   const ks=midi?.header?.keySignatures;
   return ks?.length?ks[0]:{key:'C',scale:'major'};
 }
 
-// Compound meter: 6/8, 9/8, 12/8 etc.
-// These are felt as 2/3/4 beats of 3 sub-beats each.
-function isCompoundMeter(){
-  const [bpM, bU] = getTimeSig();
-  return bU === 8 && bpM % 3 === 0 && bpM > 3;
+
+function isCompoundMeter(tick){
+  const [bpM, bU] = getTimeSig(tick);
+  return bU === 8 && bpM % 3 === 0;
 }
-// Number of FELT beats per measure in compound meter
-function compoundBeatsPerMeasure(){
-  return getTimeSig()[0] / 3;
+function compoundBeatsPerMeasure(tick){
+  const [bpM] = getTimeSig(tick);
+  return bpM === 3 ? 1 : bpM / 3;
 }
-// Ticks per felt beat in compound meter (3 eighth notes)
-function ticksPerFeltBeat(){
-  if(isCompoundMeter()){
-    // 3 eighth notes = 3 * (ppq/2) ticks
-    return ppq * 3 / 2;
-  }
-  // Simple meter: 1 quarter note = ppq ticks
+function ticksPerFeltBeat(tick){
+  if(isCompoundMeter(tick)) return ppq * 3 / 2;
   return ppq;
 }
-// Convert stored quarter-note BPM to display BPM
-// In 6/8: quarter BPM 120 → dotted-quarter BPM 80
-function displayBpm(qBpm){
-  if(isCompoundMeter()) return Math.round(qBpm / 1.5);
+function displayBpm(qBpm, tick){
+  if(isCompoundMeter(tick)) return Math.round(qBpm / 1.5);
   return Math.round(qBpm);
 }
-// Tempo marking symbol for display
-function tempoSymbol(){
-  if(isCompoundMeter()) return '♩.';
+function tempoSymbol(tick){
+  if(isCompoundMeter(tick)) return '♩.';
   return '♩';
 }
 
+
 function buildMeasureMap(){
   measureMap=[];
-  const[bpM,bU]=getTimeSig();
-  const ticksPerBeat=ppq*(4/bU);
-  const ticksPerMeas=bpM*ticksPerBeat;
 
   totalTicks=0;
   for(const n of allNotes){
@@ -612,23 +608,102 @@ function buildMeasureMap(){
   }
   const durTicks=timeToTicks(totalDuration);
   if(durTicks>totalTicks) totalTicks=durTicks;
-  totalTicks=Math.ceil(totalTicks/ticksPerMeas)*ticksPerMeas;
+  // We'll extend totalTicks to a full measure boundary at the end
 
   let mi=0, tick=0;
-  while(tick<totalTicks+1){
-    const endTick=tick+ticksPerMeas;
+  while(tick <= totalTicks + 1){
+    // Get time sig active at this tick
+    const [bpM, bU] = getTimeSig(tick);
+    const ticksPerBeat = ppq * (4 / bU);
+    const ticksPerMeas = bpM * ticksPerBeat;
+    const endTick = tick + ticksPerMeas;
+
     measureMap.push({
-      index:mi, startTick:tick, endTick, startTime:ticksToTime(tick),
-      endTime:ticksToTime(endTick), duration:ticksToTime(endTick)-ticksToTime(tick),
-      bpm:bpmAtTick(tick), beatsPerMeasure:bpM, beatUnit:bU,
+      index:mi, startTick:tick, endTick,
+      startTime:ticksToTime(tick),
+      endTime:ticksToTime(endTick),
+      duration:ticksToTime(endTick)-ticksToTime(tick),
+      bpm:bpmAtTick(tick),
+      beatsPerMeasure:bpM, beatUnit:bU,
       ticksPerMeasure:ticksPerMeas, ticksPerBeat
     });
-    tick=endTick; mi++;
-    if(mi>10000)break;
+    tick = endTick;
+    mi++;
+    if(mi > 10000) break;
   }
+
   if(!measureMap.length){
-    measureMap.push({index:0,startTick:0,endTick:ticksPerMeas,startTime:0,endTime:4,duration:4,bpm:120,beatsPerMeasure:bpM,beatUnit:bU,ticksPerMeasure:ticksPerMeas,ticksPerBeat});
+    const [bpM, bU] = getTimeSig(0);
+    const ticksPerBeat = ppq*(4/bU);
+    const ticksPerMeas = bpM*ticksPerBeat;
+    measureMap.push({
+      index:0, startTick:0, endTick:ticksPerMeas,
+      startTime:0, endTime:4, duration:4, bpm:120,
+      beatsPerMeasure:bpM, beatUnit:bU,
+      ticksPerMeasure:ticksPerMeas, ticksPerBeat
+    });
   }
+}
+
+// ─── Key signature map ───────────────────────────────────
+// Built once after MIDI load. Each entry: { tick, key, scale }
+let keySigMap = [];
+
+// ─── Time signature map ──────────────────────────────────
+let timeSigMap = [];
+
+function buildTimeSigMap(){
+  timeSigMap = [];
+  const ts = midi?.header?.timeSignatures;
+  if(!ts || !ts.length){
+    timeSigMap.push({ tick:0, numerator:4, denominator:4 });
+    return;
+  }
+  for(const t of ts){
+    timeSigMap.push({
+      tick: t.ticks || 0,
+      numerator: t.timeSignature[0],
+      denominator: t.timeSignature[1]
+    });
+  }
+  timeSigMap.sort((a,b) => a.tick - b.tick);
+  if(timeSigMap[0].tick > 0){
+    timeSigMap.unshift({ tick:0, numerator:4, denominator:4 });
+  }
+}
+
+function timeSigAtTick(tick){
+  let res = timeSigMap[0];
+  for(const ts of timeSigMap){
+    if(ts.tick <= tick) res = ts;
+    else break;
+  }
+  return res;
+}
+
+function buildKeySigMap(){
+  keySigMap = [];
+  const ks = midi?.header?.keySignatures;
+  if(!ks || !ks.length){
+    keySigMap.push({ tick:0, key:'C', scale:'major' });
+    return;
+  }
+  for(const k of ks){
+    keySigMap.push({ tick: k.ticks || 0, key: k.key, scale: k.scale });
+  }
+  keySigMap.sort((a,b) => a.tick - b.tick);
+  if(keySigMap[0].tick > 0){
+    keySigMap.unshift({ tick:0, key:'C', scale:'major' });
+  }
+}
+
+function keySigAtTick(tick){
+  let res = keySigMap[0];
+  for(const ks of keySigMap){
+    if(ks.tick <= tick) res = ks;
+    else break;
+  }
+  return res;
 }
 
 function findMeasureIndexByTick(tick){
@@ -675,9 +750,34 @@ function getTransposedKeySig(){
   return{key:newKey,scale:ks.scale};
 }
 
-function keySigAcc(){
-  let{key,scale}=getTransposedKeySig();
-  if(scale==='minor'){const r={'A':'C','E':'G','B':'D','F#':'A','C#':'E','G#':'B','D#':'F#','D':'F','G':'Bb','C':'Eb','F':'Ab','Bb':'Db','Eb':'Gb'};key=r[key]||'C';}
+function keySigAcc(tick){
+  // If tick supplied, use key sig active at that tick.
+  // Otherwise fall back to first key sig (for print header etc.)
+  let key, scale;
+  if(tick !== undefined && keySigMap.length){
+    const ks = keySigAtTick(tick);
+    // Apply transpose
+    const allKeys=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+    const flatKeys=['C','Db','D','Eb','E','F','Gb','G','Ab','A','Bb','B'];
+    let keyIdx = allKeys.indexOf(ks.key);
+    if(keyIdx===-1) keyIdx = flatKeys.indexOf(ks.key);
+    if(keyIdx===-1){ key='C'; scale='major'; }
+    else {
+      const newIdx = ((keyIdx + transpose) % 12 + 12) % 12;
+      const flatKeyNames=['C','F','Bb','Eb','Ab','Db','Gb'];
+      key = allKeys[newIdx];
+      if(flatKeyNames.includes(flatKeys[newIdx])) key = flatKeys[newIdx];
+      scale = ks.scale;
+    }
+  } else {
+    const transposed = getTransposedKeySig();
+    key = transposed.key;
+    scale = transposed.scale;
+  }
+  if(scale==='minor'){
+    const r={'A':'C','E':'G','B':'D','F#':'A','C#':'E','G#':'B','D#':'F#','D':'F','G':'Bb','C':'Eb','F':'Ab','Bb':'Db','Eb':'Gb'};
+    key=r[key]||'C';
+  }
   const sharpO=[6,1,8,3,10,5,0],flatO=[10,3,8,1,6,11,4];
   const sharpK={C:0,G:1,D:2,A:3,E:4,B:5,'F#':6,'C#':7};
   const flatK={F:1,Bb:2,Eb:3,Ab:4,Db:5,Gb:6,Cb:7};
@@ -1300,7 +1400,7 @@ function renderWaterfall(){
           scoreCtx.font = 'bold 12px sans-serif';
           scoreCtx.textAlign = 'left';
           scoreCtx.textBaseline = 'bottom';
-          scoreCtx.fillText(`${tempoSymbol()}= ${displayBpm(m.bpm)}`, 8, labelY);
+                    scoreCtx.fillText(`${tempoSymbol(m.startTick)}= ${displayBpm(m.bpm, m.startTick)}`, 8, labelY);
           labelY -= 14;
         }
         // Bar number (skip on the very first measure of the song — we know it's "1")
@@ -1467,20 +1567,24 @@ function renderScore(){
     scoreCtx.textAlign='left';
   }
 
-  const acc = keySigAcc();
-  scoreCtx.save();
+    scoreCtx.save();
   scoreCtx.translate(0, -offsetY);
 
   for(let ri=first; ri<=last; ri++){
     const row = layout.rows[ri];
+    // Use the key sig active at the START of this row
+    const rowStartTick = layout.measures[row.mStart]?.startTick || 0;
+    const acc = keySigAcc(rowStartTick);
     drawRow(scoreCtx, row, W, acc);
   }
 
-    for(let ri=first; ri<=last; ri++){
+      for(let ri=first; ri<=last; ri++){
     const notes = notesByRow[ri];
+    const rowStartTick = layout.measures[layout.rows[ri].mStart]?.startTick || 0;
+    const rowAcc = keySigAcc(rowStartTick);
     // Step 1: ledgers + bars + heads + accidentals
     for(const dn of notes){
-      drawBaseNote(scoreCtx, dn, notes, acc);
+      drawBaseNote(scoreCtx, dn, notes, rowAcc);
     }
     // Step 2: chord units → stems + flags
     const units = buildChordUnits(notes);
@@ -1615,12 +1719,61 @@ function drawRow(ctx,row,W,acc){
       ctx.fillStyle='#999';ctx.font=fontMeasureNum();ctx.textAlign='center';ctx.textBaseline='bottom';
       ctx.fillText(mi+1,x,tT-6*scoreScale);ctx.textAlign='left';
     }
+    
+        // Time signature change marker
+    if(mi > 0){
+      const prevTs = timeSigAtTick(m.startTick - 1);
+      const thisTs = timeSigAtTick(m.startTick);
+      if(prevTs.numerator !== thisTs.numerator || prevTs.denominator !== thisTs.denominator){
+        ctx.fillStyle = '#4fc3f7';
+        ctx.font = fontTempo();
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(`${thisTs.numerator}/${thisTs.denominator}`, x + 3*scoreScale, tT - 7*scoreScale - 18*scoreScale);
+        // Colored vertical line
+        ctx.save();
+        ctx.strokeStyle = '#4fc3f7';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.moveTo(x, tT);
+        ctx.lineTo(x, systemBottom(row.y));
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+    }
+
     const showTempo=(mi===0)||(prevBpm!==null&&Math.abs(m.bpm-prevBpm)>0.5);
     if(showTempo){
       ctx.fillStyle='#222';ctx.font=fontTempo();ctx.textBaseline='bottom';
-      ctx.fillText(`${tempoSymbol()}= ${displayBpm(m.bpm)}`,x+3*scoreScale,tT-7*scoreScale);
+      ctx.fillText(`${tempoSymbol(m.startTick)}= ${displayBpm(m.bpm, m.startTick)}`,x+3*scoreScale,tT-7*scoreScale);
     }
     prevBpm=m.bpm;
+
+    // Key signature change marker
+    if(mi > 0){
+      const prevKs = keySigAtTick(m.startTick - 1);
+      const thisKs = keySigAtTick(m.startTick);
+      if(prevKs.key !== thisKs.key || prevKs.scale !== thisKs.scale){
+        // Show new key name above the bar line
+        ctx.fillStyle = '#e94560';
+        ctx.font = fontTempo();
+        ctx.textBaseline = 'bottom';
+        const ksLabel = thisKs.key + (thisKs.scale === 'minor' ? 'm' : '');
+        ctx.fillText(`🔑 ${ksLabel}`, x + 3*scoreScale, tT - 7*scoreScale - 18*scoreScale);
+        // Draw a colored vertical line at the bar to signal the change
+        ctx.save();
+        ctx.strokeStyle = '#e94560';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.moveTo(x, tT);
+        ctx.lineTo(x, systemBottom(row.y));
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+    }
     // Beat sub-lines drawn later (after notes) so they sit on top
   }
 
@@ -2004,7 +2157,7 @@ function renderOverlay(){
   if(!midi || !layout.rows.length) return;
   const W = document.getElementById('scoreArea').clientWidth;
   const {first, last, offsetY, heightCss} = computeVirtRange();
-  const _overlayAccMap = keySigAcc();
+    // overlay uses per-row key sig too
 
   const dpr = window.devicePixelRatio || 1;
   const needResize = overlayCanvas.width !== Math.round(W*dpr) || overlayCanvas.height !== Math.round(heightCss*dpr);
@@ -2024,13 +2177,14 @@ function renderOverlay(){
   overlayCtx.save();
   overlayCtx.translate(0, -offsetY);
 
-  for(let ri=first; ri<=last; ri++){
+    for(let ri=first; ri<=last; ri++){
     const notes = notesByRow[ri];
+    const rowStartTick = layout.measures[layout.rows[ri].mStart]?.startTick || 0;
+    const _overlayAccMap = keySigAcc(rowStartTick);
     for(const dn of notes){
       if(dn.hand==='none' || dn.x==null) continue;
       const isActive = activeNoteSet.has(findOriginalNote(dn));
-      
-        if(!isActive) continue;
+      if(!isActive) continue;
       const cl = getTrackColor(dn.trackColorIdx||0);
       const showBar = dn.nW > HEAD_D;
 
@@ -2310,9 +2464,10 @@ function animate(ts){
 
 function updateTimeDisplay(){
   const f=s=>`${Math.floor(s/60)}:${Math.floor(s%60).toString().padStart(2,'0')}`;
+  const curTick = timeToTicks(currentTime);
   const rawBpm = bpmAtTime(currentTime);
-  const dBpm = displayBpm(rawBpm);
-  const sym = tempoSymbol();
+  const dBpm = displayBpm(rawBpm, curTick);
+  const sym = tempoSymbol(curTick);
   document.getElementById('timeDisplay').textContent=`${f(currentTime)} / ${f(totalDuration)}  ${sym}=${dBpm}`;
 }
 
@@ -2434,15 +2589,13 @@ function actuallyStartPlayback(){
 
 function runCountInThenPlay(){
   initMetro();
-    const compound = isCompoundMeter();
-  const [bpM] = getTimeSig();
-  // Compound meter: click on felt beats (6/8 → 2 clicks, 9/8 → 3, 12/8 → 4)
-  // Simple meter: if >4 beats use half, otherwise full
+      const curTick = timeToTicks(currentTime);
+  const compound = isCompoundMeter(curTick);
+  const [bpM] = getTimeSig(curTick);
   const clickCount = compound
-    ? compoundBeatsPerMeasure()
+    ? compoundBeatsPerMeasure(curTick)
     : bpM > 4 ? Math.ceil(bpM / 2) : bpM;
   const bpm = bpmAtTime(currentTime);
-  // Beat duration: in compound, felt beat = dotted quarter = 1.5 × quarter
   const beatDurSec = compound
     ? (60 / bpm) * 1.5 / playbackSpeed
     : (60 / bpm) / playbackSpeed;
@@ -2515,36 +2668,39 @@ function startStandaloneMetro(){
   standaloneMetroActive = true;
   updateMetroBtn();
 
-  // In compound meter: use dotted-quarter BPM for felt beats
-  // In simple meter: use quarter-note BPM directly
-  const compound = isCompoundMeter();
-  const rawBpm = standaloneMetroFixed
-    ? standaloneMetroFixedBpm
-    : Math.round(bpmAtTime(currentTime));
-
-    // Apply playback speed only in auto mode (fixed BPM ignores speed)
-  const effectiveSpeed = standaloneMetroFixed ? 1.0 : playbackSpeed;
-
-  const transportBpm = (compound && !standaloneMetroFixed)
-    ? rawBpm * effectiveSpeed
-    : standaloneMetroFixed && compound
-      ? rawBpm * 1.5
-      : rawBpm * effectiveSpeed;
-
-  // Felt beat interval in seconds (speed-adjusted)
-  const feltBeatsPerMeasure = compound ? compoundBeatsPerMeasure() : getTimeSig()[0];
-  const beatDurSec = compound
-    ? (60 / rawBpm) * 1.5 / effectiveSpeed
-    : (60 / rawBpm) / effectiveSpeed;
-
   Tone.Transport.cancel();
   Tone.Transport.stop();
-  Tone.Transport.bpm.value = transportBpm;
+
+  let beatDurSec, beatsPerMeasure;
+
+  if(standaloneMetroFixed){
+    // ── FIXED MODE ──────────────────────────────────────────
+    // User typed a BPM. That's it. No score, no speed, no meter.
+    // Just a plain metronome at exactly that BPM, 4 beats per bar
+    // (accenting beat 1 only, since we don't know the intended meter).
+    beatDurSec = 60 / standaloneMetroFixedBpm;
+    beatsPerMeasure = 4; // accent every 4th tick
+    Tone.Transport.bpm.value = standaloneMetroFixedBpm;
+  } else {
+    // ── AUTO MODE ────────────────────────────────────────────
+    // Use score tempo × playback speed, respect compound meter.
+        const curTick = timeToTicks(currentTime);
+    const compound = isCompoundMeter(curTick);
+    const rawBpm = Math.round(bpmAtTime(currentTime));
+    const speedAdjustedBpm = rawBpm * playbackSpeed;
+
+    beatsPerMeasure = compound ? compoundBeatsPerMeasure(curTick) : getTimeSig(curTick)[0];
+    beatDurSec = compound
+      ? (60 / speedAdjustedBpm) * 1.5  // dotted quarter duration
+      : 60 / speedAdjustedBpm;
+
+    Tone.Transport.bpm.value = speedAdjustedBpm;
+  }
 
   let beatCount = 0;
   Tone.Transport.scheduleRepeat(time => {
     if(!standaloneMetroActive) return;
-    const isDown = (beatCount % feltBeatsPerMeasure === 0);
+    const isDown = (beatCount % beatsPerMeasure === 0);
     metroSynth.volume.value = isDown ? -6 : -14;
     metroSynth.triggerAttackRelease('16n', time);
     beatCount++;
@@ -2622,11 +2778,9 @@ function scheduleAudio(){
   }
     if(metronomeOn){
     initMetro();
-    const compound = isCompoundMeter();
     for(const meas of measureMap){
-      // In compound meter: beat on every group of 3 eighth notes
-      // In simple meter: beat on every quarter note beat
-      const feltBeats = compound ? compoundBeatsPerMeasure() : meas.beatsPerMeasure;
+      const compound = isCompoundMeter(meas.startTick);
+      const feltBeats = compound ? compoundBeatsPerMeasure(meas.startTick) : meas.beatsPerMeasure;
       const measDur = meas.endTime - meas.startTime;
       for(let b = 0; b < feltBeats; b++){
         const beatTime = meas.startTime + b * (measDur / feltBeats);
@@ -2713,7 +2867,7 @@ async function loadFile(file){
     songDisplayName=name;
     document.title='DIDI Piano — '+name;
     transpose=0;document.getElementById('transposeVal').textContent='0';document.getElementById('transposeVal').style.color='#4fc3f7';
-    setupTracks();parseNotes();buildTempoMap();buildMeasureMap();
+    setupTracks();parseNotes();buildTempoMap();buildTimeSigMap();buildKeySigMap();buildMeasureMap();
     updatePianoRange();buildTrackChips();stopPlayback();
     await new Promise(r=>setTimeout(r,50));scrollOffset=0;fullRebuild();
   }catch(e){alert('Error: '+e.message);console.error(e);}
@@ -2915,7 +3069,7 @@ function printScore(){
         if(m.index>pRow.mStart){ctx.strokeStyle='#444';ctx.lineWidth=1.0;ctx.beginPath();ctx.moveTo(x,tT);ctx.lineTo(x,sysBot);ctx.stroke();}
         if(m.index>0){ctx.fillStyle='#999';ctx.font='bold 9px sans-serif';ctx.textAlign='center';ctx.textBaseline='bottom';ctx.fillText(m.index+1,x,tT-6);ctx.textAlign='left';}
         const showTempo=(m.index===0)||(prevBpm!==null&&Math.abs(m.bpm-prevBpm)>0.5);
-        if(showTempo){ctx.fillStyle='#222';ctx.font='bold 14px sans-serif';ctx.textBaseline='bottom';ctx.fillText(`${tempoSymbol()}= ${displayBpm(m.bpm)}`,x+3,tT-7);}
+                if(showTempo){ctx.fillStyle='#222';ctx.font='bold 14px sans-serif';ctx.textBaseline='bottom';ctx.fillText(`${tempoSymbol(m.startTick)}= ${displayBpm(m.bpm, m.startTick)}`,x+3,tT-7);}
         prevBpm=m.bpm;
         
       }
