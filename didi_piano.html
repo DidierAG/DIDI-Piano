@@ -420,6 +420,7 @@ function fontContinuation(){ return `bold ${8 * scoreScale}px sans-serif`; }
 function fontKeySig()     { return `${(L.LINE_GAP + 2)}px serif`; }
 function fontTimeSig()    { return `bold ${L.LINE_GAP * 1.5}px serif`; }
 
+const ACCENT_VELOCITY_THRESHOLD = 0.75; // notes with velocity >= this get a ">" marker
 const VIRT_BUFFER_ROWS = 2;
 const TAP_MAX_DURATION = 200;  // ms
 const TAP_MAX_MOVEMENT = 8;    // px
@@ -1128,6 +1129,7 @@ function buildNotesByRow(){
   }
 }
 
+
 function buildNoteEvents(){
   noteEvents=[];
   for(let i=0;i<allNotes.length;i++){
@@ -1586,11 +1588,15 @@ function renderScore(){
     for(const dn of notes){
       drawBaseNote(scoreCtx, dn, notes, rowAcc);
     }
-    // Step 2: chord units → stems + flags
+        // Step 2: chord units → stems + flags + accents
     const units = buildChordUnits(notes);
     const beamMap = buildBeamGroupsFromUnits(units);
     for(const u of units){
       drawUnitStem(scoreCtx, u, beamMap.get(u));
+      // Draw accent ">" if any note in the chord is accented
+      if(u.notes.some(n => n.velocity >= ACCENT_VELOCITY_THRESHOLD)){
+        drawAccent(scoreCtx, u);
+      }
     }
     // Step 3: beams (drawn once per group)
     const drawnBeams = new Set();
@@ -2100,6 +2106,44 @@ function drawFlag(ctx, stemX, stemEndY, dir){
   ctx.fill();
 }
 
+// Draw an accent ">" marker above or below a chord unit.
+// Position: opposite side from stem (if stem up → accent below, stem down → accent above).
+// This matches standard engraving practice.
+function drawAccent(ctx, unit){
+  const dir = unit.stemDir;
+  // Pick the note at the extreme end (farthest from stem tip)
+  // stem up → accent goes below bottom note
+  // stem down → accent goes above top note
+  const refNote = (dir === 'up') ? unit.notes[unit.notes.length - 1] : unit.notes[0];
+  const cx = refNote.x + HEAD_R;
+  const margin = HEAD_R + 4 * scoreScale;
+  const y = (dir === 'up')
+    ? refNote.cy + margin          // below
+    : refNote.cy - margin;         // above
+
+  const size = 7 * scoreScale;
+  ctx.save();
+  ctx.strokeStyle = '#111';
+  ctx.lineWidth = 1.5 * scoreScale;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  // ">" shape: two lines meeting at a point on the right
+  if(dir === 'up'){
+    // accent below: ">" rotated 90° → points downward like a checkmark open to the right
+    ctx.moveTo(cx - size, y - size * 0.5);
+    ctx.lineTo(cx + size * 0.3, y);
+    ctx.lineTo(cx - size, y + size * 0.5);
+  } else {
+    // accent above: same but mirrored vertically
+    ctx.moveTo(cx - size, y + size * 0.5);
+    ctx.lineTo(cx + size * 0.3, y);
+    ctx.lineTo(cx - size, y - size * 0.5);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
 // Draw one or more beam bars connecting all stems in a beam group
 function drawBeam(ctx, beam){
   const units = beam.units;
@@ -2537,13 +2581,15 @@ function initSynths(){
   const loading = document.getElementById('loading');
   loading.textContent = '🎹 Loading piano sounds…';
   loading.style.display = 'block';
-  for(let i = 0; i < trackCount; i++){
+    for(let i = 0; i < trackCount; i++){
     const s = new Tone.Sampler({
       urls: PIANO_SAMPLES,
       baseUrl: PIANO_BASE_URL,
       release: 1,
     }).toDestination();
-    s.volume.value = -6 - i * 2;
+    // Lighter offset so velocity dynamics have room to breathe
+    // Track 0 (right hand) slightly louder than track 1 (left hand)
+    s.volume.value = -4 - i * 1.5;
     synths.push(s);
   }
   // Hide loading indicator once samples are ready
@@ -2774,8 +2820,9 @@ function scheduleAudio(){
     const synthIdx=Math.min(note.trackColorIdx||0,synths.length-1);
     const freq=Tone.Frequency(note.midi+transpose,'midi').toFrequency();
     const dur=note.duration/playbackSpeed;
-    scheduledIds.push(Tone.Transport.schedule(t=>{synths[synthIdx].triggerAttackRelease(freq,Math.max(dur,.04),t,note.velocity);},Math.max(offset,0)));
-  }
+        const vel = Math.max(0.05, Math.min(1.0, note.velocity)); // clamp safely, never fully silent
+    scheduledIds.push(Tone.Transport.schedule(t=>{synths[synthIdx].triggerAttackRelease(freq,Math.max(dur,.04),t,vel);},Math.max(offset,0)));
+    }
     if(metronomeOn){
     initMetro();
     for(const meas of measureMap){
@@ -3122,10 +3169,15 @@ function printScore(){
         }
       }
       
-        // Stems + flags + beams (per chord unit)
+            // Stems + flags + beams + accents (per chord unit)
       const printUnits = buildChordUnits(printRowNotes);
       const printBeamMap = buildBeamGroupsFromUnits(printUnits);
-      for(const u of printUnits) drawUnitStem(ctx, u, printBeamMap.get(u));
+      for(const u of printUnits){
+        drawUnitStem(ctx, u, printBeamMap.get(u));
+        if(u.notes.some(n => n.velocity >= ACCENT_VELOCITY_THRESHOLD)){
+          drawAccent(ctx, u);
+        }
+      }
       const drawnPrintBeams = new Set();
       for(const [u, beam] of printBeamMap){
         if(drawnPrintBeams.has(beam)) continue;
