@@ -426,12 +426,18 @@ const TAP_MAX_DURATION = 200;  // ms
 const TAP_MAX_MOVEMENT = 8;    // px
 
 function staffHeight(){return 4*L.LINE_GAP;}
-function systemHeight(){return staffHeight()+L.STAFF_GAP+staffHeight();}
-function rowHeight(){return L.ROW_PAD_T+systemHeight()+L.ROW_PAD_B+L.ROW_GAP;}
-function trebleTop(rowY){return rowY+L.ROW_PAD_T;}
-function bassTop(rowY){return rowY+L.ROW_PAD_T+staffHeight()+L.STAFF_GAP;}
-function systemBottom(rowY){return bassTop(rowY)+staffHeight();}
-function systemVisualHeight(){return L.ROW_PAD_T+systemHeight()+L.ROW_PAD_B;}
+function systemHeight(staffGap){return staffHeight()+(staffGap!=null?staffGap:L.STAFF_GAP)+staffHeight();}
+function rowHeight(geo){
+  const g=geo||{rowPadT:L.ROW_PAD_T,staffGap:L.STAFF_GAP,rowPadB:L.ROW_PAD_B};
+  return g.rowPadT+systemHeight(g.staffGap)+g.rowPadB+L.ROW_GAP;
+}
+function trebleTop(rowY,geo){return rowY+(geo?geo.rowPadT:L.ROW_PAD_T);}
+function bassTop(rowY,geo){return rowY+(geo?geo.rowPadT:L.ROW_PAD_T)+staffHeight()+(geo?geo.staffGap:L.STAFF_GAP);}
+function systemBottom(rowY,geo){return bassTop(rowY,geo)+staffHeight();}
+function systemVisualHeight(geo){
+  const g=geo||{rowPadT:L.ROW_PAD_T,staffGap:L.STAFF_GAP,rowPadB:L.ROW_PAD_B};
+  return g.rowPadT+systemHeight(g.staffGap)+g.rowPadB;
+}
 
 // ═══════════════════════════════════════════════════════════
 // STATE
@@ -791,9 +797,10 @@ function keySigAcc(tick){
 const DIA_MAP=[0,0,1,1,2,3,3,4,4,5,5,6];
 function diaPos(m){return Math.floor(m/12-1)*7+DIA_MAP[((m%12)+12)%12];}
 const DIA_E4=diaPos(64),DIA_G2=diaPos(43);
-function trebleNoteY(m,rowY){return trebleTop(rowY)+staffHeight()-(diaPos(m)-DIA_E4)*(L.LINE_GAP/2);}
-function bassNoteY(m,rowY){return bassTop(rowY)+staffHeight()-(diaPos(m)-DIA_G2)*(L.LINE_GAP/2);}
-function noteY(m,hand,rowY){return hand==='right'?trebleNoteY(m,rowY):bassNoteY(m,rowY);}
+
+function trebleNoteY(m,rowY,geo){return trebleTop(rowY,geo)+staffHeight()-(diaPos(m)-DIA_E4)*(L.LINE_GAP/2);}
+function bassNoteY(m,rowY,geo){return bassTop(rowY,geo)+staffHeight()-(diaPos(m)-DIA_G2)*(L.LINE_GAP/2);}
+function noteY(m,hand,rowY,geo){return hand==='right'?trebleNoteY(m,rowY,geo):bassNoteY(m,rowY,geo);}
 
 function pillSplit(ctx,x,y,w,h,r,flatL,flatR){
   if(w<2*r)r=w/2;if(h<2*r)r=h/2;
@@ -926,12 +933,11 @@ function startMomentum(vy){
 
 // Check if cursor is currently visible on screen
 function isCursorVisible(){
-  const pos = tickToPos(timeToTicks(currentTime));
-  if(!pos) return false;
-  const viewH = getViewHeight();
-  const rowTop = pos.rowY;
-  const rowBot = pos.rowY + systemVisualHeight();
-  return rowBot > scrollOffset && rowTop < scrollOffset + viewH;
+  const pos=tickToPos(timeToTicks(currentTime));
+  if(!pos)return false;
+  const viewH=getViewHeight();
+  const rowBot=pos.rowY+systemVisualHeight(pos.geo);
+  return rowBot>scrollOffset&&pos.rowY<scrollOffset+viewH;
 }
 
 // Stateless smart auto-follow:
@@ -939,40 +945,32 @@ function isCursorVisible(){
 // last fully-visible row, nudge scroll proportionally to cursor's progress
 // through that row, so next row becomes fully visible by row-end.
 function smartAutoFollow(){
-  if(isUserScrolling()) return;
+  if(isUserScrolling())return;
+  const pos=tickToPos(timeToTicks(currentTime));
+  if(!pos)return;
+  const viewH=getViewHeight();
+  const row=layout.rows[pos.rowIndex];
+  if(!row)return;
+  const geo=row.geo;
+  const rH=rowHeight(geo);
+  const rowTop=pos.rowY;
+  const rowBot=pos.rowY+systemVisualHeight(geo);
+  const nextRow=layout.rows[pos.rowIndex+1];
+  const nextRowBot=nextRow?nextRow.y+systemVisualHeight(nextRow.geo):rowTop+rH+systemVisualHeight(geo);
 
-  const pos = tickToPos(timeToTicks(currentTime));
-  if(!pos) return;
+  const isLastFullyVisible=(rowBot<=scrollOffset+viewH+1)&&(nextRowBot>scrollOffset+viewH+1);
+  if(!isLastFullyVisible)return;
 
-  const viewH = getViewHeight();
-  const rH = rowHeight();
-  const rowTop = pos.rowY;
-  const rowBot = pos.rowY + systemVisualHeight();
-  const nextRowBot = rowTop + rH + systemVisualHeight();
+  const firstM=layout.measures[row.mStart];
+  const lastM=layout.measures[row.mEnd-1];
+  if(!firstM||!lastM)return;
+  const curTick=timeToTicks(currentTime);
+  const progress=Math.max(0,Math.min(1,(curTick-firstM.startTick)/(lastM.endTick-firstM.startTick)));
 
-  // Is cursor's row the last FULLY-visible row?
-  const isLastFullyVisible = (rowBot <= scrollOffset + viewH + 1) && (nextRowBot > scrollOffset + viewH + 1);
-  if(!isLastFullyVisible) return;
-
-  // Compute cursor's horizontal progress through its row
-  const row = layout.rows[Math.floor((rowTop - TITLE_HEIGHT) / rH)];
-  if(!row) return;
-  const firstM = layout.measures[row.mStart];
-  const lastM = layout.measures[row.mEnd - 1];
-  if(!firstM || !lastM) return;
-  const curTick = timeToTicks(currentTime);
-  const progress = Math.max(0, Math.min(1, (curTick - firstM.startTick) / (lastM.endTick - firstM.startTick)));
-
-  // Target: by progress=1, next row should be fully visible WITH breathing room.
-  // We advance scroll by (rH + ROW_GAP/2) over the row — so next row sits
-  // comfortably above the bottom edge, not crammed against it.
-  const baseScroll = rowBot - viewH;
-  const advance = rH + L.ROW_GAP;
-  const desired = baseScroll + progress * advance;
-
-  if(desired > scrollOffset){
-    setScroll(desired);
-  }
+  const baseScroll=rowBot-viewH;
+  const advance=rH+L.ROW_GAP;
+  const desired=baseScroll+progress*advance;
+  if(desired>scrollOffset)setScroll(desired);
 }
 
 
@@ -1031,39 +1029,108 @@ document.getElementById('scoreArea').addEventListener('wheel',e=>{
 // ═══════════════════════════════════════════════════════════
 // LAYOUT
 // ═══════════════════════════════════════════════════════════
+
+function computeRowNoteExtremes(mStartTick, mEndTick){
+  const TEMP_ROW_Y = 0;
+  let trebleMinY = trebleTop(TEMP_ROW_Y);
+  let trebleMaxY = trebleTop(TEMP_ROW_Y)+staffHeight();
+  let bassMinY   = bassTop(TEMP_ROW_Y);
+  let bassMaxY   = bassTop(TEMP_ROW_Y)+staffHeight();
+  for(const note of allNotes){
+    if(note.hand==='none') continue;
+    if(note.ticks>=mEndTick) continue;
+    const noteEnd=note.ticks+note.durationTicks;
+    if(noteEnd<=mStartTick) continue;
+    const dispMidi=note.midi+transpose;
+    if(note.hand==='right'){
+      const cy=trebleNoteY(dispMidi,TEMP_ROW_Y);
+      if(cy<trebleMinY) trebleMinY=cy;
+      if(cy>trebleMaxY) trebleMaxY=cy;
+    } else {
+      const cy=bassNoteY(dispMidi,TEMP_ROW_Y);
+      if(cy<bassMinY) bassMinY=cy;
+      if(cy>bassMaxY) bassMaxY=cy;
+    }
+  }
+  return{trebleMinY,trebleMaxY,bassMinY,bassMaxY};
+}
+
+function computeRowGeometry(extremes){
+  const sH=staffHeight();
+  const margin=HEAD_R+4*scoreScale;
+  const trebleStaffTop=L.ROW_PAD_T;
+  const trebleStaffBot=L.ROW_PAD_T+sH;
+
+  // How much top padding do we need?
+  const neededPadT=Math.max(L.ROW_PAD_T, trebleStaffTop-extremes.trebleMinY+margin);
+
+  // How much staff gap do we need?
+  const minBassTop=extremes.trebleMaxY+2*margin;
+  const computedGap=Math.max(L.STAFF_GAP, minBassTop-trebleStaffBot);
+
+  // How much bottom padding do we need?
+  const bassStaffBot=L.ROW_PAD_T+sH+computedGap+sH;
+  const neededPadB=Math.max(L.ROW_PAD_B, extremes.bassMaxY+margin-bassStaffBot);
+
+  return{rowPadT:neededPadT, staffGap:computedGap, rowPadB:neededPadB};
+}
+
 function buildLayout(){
   if(!midi)return;
   const scoreW=document.getElementById('scoreArea').clientWidth;
   const contentW=scoreW-clefPanelWidth()-L.MARGIN_RIGHT-20;
-  const [bpM] = getTimeSig();
-  const measW = bpM * getPxPerBeat();
-  const measPerRow = Math.max(1, Math.floor(contentW / measW));
-  const actualMeasW = contentW / measPerRow;
+  const [bpM]=getTimeSig();
+  const measW=bpM*getPxPerBeat();
+  const measPerRow=Math.max(1,Math.floor(contentW/measW));
+  const actualMeasW=contentW/measPerRow;
 
-  layout.measuresPerRow = measPerRow;
-  layout.rows = [];
-  layout.measures = [];
+  layout.measuresPerRow=measPerRow;
+  layout.rows=[];
+  layout.measures=[];
 
-  const totalMeasures = measureMap.length;
-  const totalRows = Math.ceil(totalMeasures / measPerRow);
-  const rH = rowHeight();
+  const totalMeasures=measureMap.length;
+  const totalRows=Math.ceil(totalMeasures/measPerRow);
 
-  for(let r = 0; r < totalRows; r++){
-    const rowY = TITLE_HEIGHT + r * rH;
-    const mStart = r * measPerRow;
-    const mEnd = Math.min(mStart + measPerRow, totalMeasures);
-    for(let mi = mStart; mi < mEnd; mi++){
+  // Pass 1: compute per-row geometry
+  const rowGeos=[];
+  for(let r=0;r<totalRows;r++){
+    const mStart=r*measPerRow;
+    const mEnd=Math.min(mStart+measPerRow,totalMeasures);
+    const mStartTick=measureMap[mStart].startTick;
+    const mEndTick=measureMap[mEnd-1].endTick;
+    const extremes=computeRowNoteExtremes(mStartTick,mEndTick);
+    rowGeos.push(computeRowGeometry(extremes));
+  }
+
+  // Title height
+  const firstGeo=rowGeos[0]||{rowPadT:L.ROW_PAD_T,staffGap:L.STAFF_GAP,rowPadB:L.ROW_PAD_B};
+  const effectiveTitleHeight=Math.max(
+    TITLE_HEIGHT_BASE*scoreScale,
+    TITLE_HEIGHT_BASE*scoreScale+(firstGeo.rowPadT-L.ROW_PAD_T)
+  );
+  layout.titleHeight=effectiveTitleHeight;
+
+  // Pass 2: assign Y positions
+  let curY=effectiveTitleHeight;
+  for(let r=0;r<totalRows;r++){
+    const geo=rowGeos[r];
+    const rowY=curY;
+    const mStart=r*measPerRow;
+    const mEnd=Math.min(mStart+measPerRow,totalMeasures);
+    for(let mi=mStart;mi<mEnd;mi++){
       layout.measures.push({
         ...measureMap[mi],
-        xInRow: (mi - mStart) * actualMeasW,
-        width: actualMeasW,
-        rowIndex: r,
-        rowY
+        xInRow:(mi-mStart)*actualMeasW,
+        width:actualMeasW,
+        rowIndex:r,
+        rowY,
+        geo
       });
     }
-    layout.rows.push({mStart, mEnd, y: rowY});
+    layout.rows.push({mStart,mEnd,y:rowY,geo});
+    curY+=rowHeight(geo);
   }
-  layout.totalHeight = TITLE_HEIGHT + totalRows * rH + 20;
+  layout.totalHeight=curY+20;
 }
 
 function buildDrawNotes(){
@@ -1096,25 +1163,26 @@ function buildDrawNotes(){
   buildNotesByRow();
 }
 
-function makeDrawNote(note, drawTick, drawDurationTicks, isContinuation, isSplit, rowIndex){
-  const dn = {
-    midi:note.midi, time:note.time, duration:note.duration,
-    ticks:note.ticks, durationTicks:note.durationTicks,
-    velocity:note.velocity, hand:note.hand, trackColorIdx:note.trackColorIdx,
-    drawTick, drawDurationTicks, isContinuation, isSplit, rowIndex
+function makeDrawNote(note,drawTick,drawDurationTicks,isContinuation,isSplit,rowIndex){
+  const dn={
+    midi:note.midi,time:note.time,duration:note.duration,
+    ticks:note.ticks,durationTicks:note.durationTicks,
+    velocity:note.velocity,hand:note.hand,trackColorIdx:note.trackColorIdx,
+    drawTick,drawDurationTicks,isContinuation,isSplit,rowIndex
   };
   const mi=findMeasureIndexByTick(drawTick);
   const m=layout.measures[mi];
   if(m){
     const fracStart=Math.max(0,(drawTick-m.startTick)/m.ticksPerMeasure);
     const fracDur=drawDurationTicks/m.ticksPerMeasure;
-    dn.x = clefPanelWidth()+m.xInRow+fracStart*m.width;
-    dn.nW = Math.max(fracDur*m.width,4);
-    dn.rowY = m.rowY;
-    const dispMidi = dn.midi+transpose;
-    dn.cy = noteY(dispMidi, dn.hand, m.rowY);
-    dn.ny = dn.cy - L.NOTE_H/2;
-    dn.dispMidi = dispMidi;
+    dn.x=clefPanelWidth()+m.xInRow+fracStart*m.width;
+    dn.nW=Math.max(fracDur*m.width,4);
+    dn.rowY=m.rowY;
+    dn.geo=m.geo;
+    const dispMidi=dn.midi+transpose;
+    dn.cy=noteY(dispMidi,dn.hand,m.rowY,m.geo);
+    dn.ny=dn.cy-L.NOTE_H/2;
+    dn.dispMidi=dispMidi;
   }
   return dn;
 }
@@ -1176,14 +1244,14 @@ function tickToPos(tick){
   const mi=findMeasureIndexByTick(tick);
   const m=layout.measures[mi];if(!m)return null;
   const frac=Math.max(0,Math.min(1,(tick-m.startTick)/m.ticksPerMeasure));
-  return{rowIndex:m.rowIndex, rowY:m.rowY, x:clefPanelWidth()+m.xInRow+frac*m.width};
+  return{rowIndex:m.rowIndex,rowY:m.rowY,geo:m.geo,x:clefPanelWidth()+m.xInRow+frac*m.width};
 }
 
 function posToTime(cx,cy){
   const absY=cy+scrollOffset;
   for(let ri=0;ri<layout.rows.length;ri++){
     const row=layout.rows[ri];
-    const rowTop=row.y, rowBot=row.y+systemVisualHeight();
+    const rowTop=row.y, rowBot=row.y+systemVisualHeight(row.geo);
     if(absY>=rowTop&&absY<rowBot){
       const xContent=cx-clefPanelWidth();
       // Click in clef area → seek to start of this row's first measure
@@ -1228,19 +1296,31 @@ function posToTime(cx,cy){
 }
 
 function computeVirtRange(){
-  const viewH = getViewHeight();
-  const rH = rowHeight();
-  const rowsVisible = Math.ceil(viewH / rH) + 1;
-  const buffer = VIRT_BUFFER_ROWS;
-  const firstVisibleRow = Math.max(0, Math.floor((scrollOffset - TITLE_HEIGHT) / rH));
-  const first = Math.max(0, firstVisibleRow - buffer);
-  const last = Math.min(layout.rows.length-1, firstVisibleRow + rowsVisible + buffer);
+  const viewH=getViewHeight();
+  const titleH=layout.titleHeight||TITLE_HEIGHT_BASE*scoreScale;
 
-  const offsetY = (first === 0) ? 0 : TITLE_HEIGHT + first * rH;
-  const canvasRows = last - first + 1;
-  const heightCss = (first === 0 ? TITLE_HEIGHT : 0) + canvasRows * rH + 20;
+  // Find first visible row
+  let first=0;
+  for(let i=0;i<layout.rows.length;i++){
+    if(layout.rows[i].y+systemVisualHeight(layout.rows[i].geo)>=scrollOffset){
+      first=Math.max(0,i-VIRT_BUFFER_ROWS);
+      break;
+    }
+  }
+  // Find last visible row
+  let last=layout.rows.length-1;
+  for(let i=first;i<layout.rows.length;i++){
+    if(layout.rows[i].y>scrollOffset+viewH){
+      last=Math.min(layout.rows.length-1,i+VIRT_BUFFER_ROWS);
+      break;
+    }
+  }
 
-  return {first, last, offsetY, heightCss};
+  const offsetY=(first===0)?0:layout.rows[first].y;
+  const lastRow=layout.rows[last];
+  const heightCss=lastRow?(lastRow.y+rowHeight(lastRow.geo))-offsetY+20:viewH;
+
+  return{first,last,offsetY,heightCss};
 }
 
 
@@ -1565,7 +1645,8 @@ function renderScore(){
     scoreCtx.font=fontTitle();
     scoreCtx.textAlign='center';
     scoreCtx.textBaseline='middle';
-    scoreCtx.fillText(songDisplayName, W/2, TITLE_HEIGHT/2+2);
+        const tH=layout.titleHeight||TITLE_HEIGHT_BASE*scoreScale;
+    scoreCtx.fillText(songDisplayName, W/2, tH/2+2);
     scoreCtx.textAlign='left';
   }
 
@@ -1627,7 +1708,7 @@ function drawBaseNote(ctx, dn, rowNotes, accMap){
   const cl = getTrackColor(dn.trackColorIdx||0);
 
   // 1. Ledger lines
-  drawLedger(ctx, dn.dispMidi, dn.hand, dn.rowY, dn.x, dn.nW);
+  drawLedger(ctx, dn.dispMidi, dn.hand, dn.rowY, dn.x, dn.nW, dn.geo);
 
   // 2. Duration bar (pill) — always drawn when bar is wider than note head
   //    When note head covers the bar entirely, we skip the bar.
@@ -1658,8 +1739,8 @@ function drawBaseNote(ctx, dn, rowNotes, accMap){
 }
 
 function drawRow(ctx,row,W,acc){
-  const{mStart,mEnd,y}=row;
-  const tT=trebleTop(y),bT=bassTop(y),sH=staffHeight(),sysBot=systemBottom(y);
+  const{mStart,mEnd,y,geo}=row;
+  const tT=trebleTop(y,geo),bT=bassTop(y,geo),sH=staffHeight(),sysBot=systemBottom(y,geo);
   const cpW=clefPanelWidth();
   const contentRight=W-L.MARGIN_RIGHT-20;
 
@@ -1742,7 +1823,7 @@ function drawRow(ctx,row,W,acc){
         ctx.setLineDash([4, 3]);
         ctx.beginPath();
         ctx.moveTo(x, tT);
-        ctx.lineTo(x, systemBottom(row.y));
+        ctx.lineTo(x, systemBottom(row.y,geo));
         ctx.stroke();
         ctx.setLineDash([]);
         ctx.restore();
@@ -1774,7 +1855,7 @@ function drawRow(ctx,row,W,acc){
         ctx.setLineDash([4, 3]);
         ctx.beginPath();
         ctx.moveTo(x, tT);
-        ctx.lineTo(x, systemBottom(row.y));
+        ctx.lineTo(x, systemBottom(row.y,geo));
         ctx.stroke();
         ctx.setLineDash([]);
         ctx.restore();
@@ -1798,21 +1879,21 @@ function drawRow(ctx,row,W,acc){
   }
 }
 
-function drawBeatLinesForRow(ctx, row){
-  const {mStart, mEnd, y} = row;
-  const tT = trebleTop(y), bT = bassTop(y), sH = staffHeight();
-  const cpW = clefPanelWidth();
-  for(let mi = mStart; mi < mEnd; mi++){
-    const m = layout.measures[mi];
-    if(!m) continue;
-    const x = cpW + m.xInRow;
-    for(let b = 1; b < m.beatsPerMeasure; b++){
-      const bx = x + b * (m.width / m.beatsPerMeasure);
-      ctx.strokeStyle = 'rgba(0,0,0,0.28)';
-      ctx.lineWidth = 0.5;
-      ctx.setLineDash([3, 3]);
-      ctx.beginPath(); ctx.moveTo(bx, tT); ctx.lineTo(bx, tT + sH); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(bx, bT); ctx.lineTo(bx, bT + sH); ctx.stroke();
+function drawBeatLinesForRow(ctx,row){
+  const{mStart,mEnd,y,geo}=row;
+  const tT=trebleTop(y,geo),bT=bassTop(y,geo),sH=staffHeight();
+  const cpW=clefPanelWidth();
+  for(let mi=mStart;mi<mEnd;mi++){
+    const m=layout.measures[mi];
+    if(!m)continue;
+    const x=cpW+m.xInRow;
+    for(let b=1;b<m.beatsPerMeasure;b++){
+      const bx=x+b*(m.width/m.beatsPerMeasure);
+      ctx.strokeStyle='rgba(0,0,0,0.28)';
+      ctx.lineWidth=0.5;
+      ctx.setLineDash([3,3]);
+      ctx.beginPath();ctx.moveTo(bx,tT);ctx.lineTo(bx,tT+sH);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(bx,bT);ctx.lineTo(bx,bT+sH);ctx.stroke();
     }
   }
   ctx.setLineDash([]);
@@ -2182,12 +2263,11 @@ function drawNoteLabel(ctx,note,dispMidi,x,nW,cy,insideColor,outsideColor){
   }else{ctx.font='bold 8px sans-serif';ctx.fillStyle=outsideColor;ctx.textAlign='left';ctx.textBaseline='middle';ctx.fillText(label,x+nW+2,cy+0.5);}
 }
 
-function drawLedger(ctx,m,hand,rowY,noteX,noteW){
-  const sTop=hand==='right'?trebleTop(rowY):bassTop(rowY),sBot=sTop+staffHeight();
-  const cy=noteY(m,hand,rowY);
-  // Ledger spans the note head (not the duration bar) — centered on head
-  const lw = HEAD_D + 4 * scoreScale;
-  const lx = noteX + HEAD_R - lw/2;
+function drawLedger(ctx,m,hand,rowY,noteX,noteW,geo){
+  const sTop=hand==='right'?trebleTop(rowY,geo):bassTop(rowY,geo),sBot=sTop+staffHeight();
+  const cy=noteY(m,hand,rowY,geo);
+  const lw=HEAD_D+4*scoreScale;
+  const lx=noteX+HEAD_R-lw/2;
   ctx.strokeStyle='#999';ctx.lineWidth=0.7;
   if(cy<sTop-L.LINE_GAP*0.4){for(let ly=sTop-L.LINE_GAP;ly>=cy-1;ly-=L.LINE_GAP){ctx.beginPath();ctx.moveTo(lx,ly);ctx.lineTo(lx+lw,ly);ctx.stroke();}}
   if(cy>sBot+L.LINE_GAP*0.4){for(let ly=sBot+L.LINE_GAP;ly<=cy+1;ly+=L.LINE_GAP){ctx.beginPath();ctx.moveTo(lx,ly);ctx.lineTo(lx+lw,ly);ctx.stroke();}}
@@ -2221,10 +2301,11 @@ function renderOverlay(){
   overlayCtx.save();
   overlayCtx.translate(0, -offsetY);
 
-    for(let ri=first; ri<=last; ri++){
+  for(let ri=first; ri<=last; ri++){
     const notes = notesByRow[ri];
     const rowStartTick = layout.measures[layout.rows[ri].mStart]?.startTick || 0;
     const _overlayAccMap = keySigAcc(rowStartTick);
+    const _rowGeo = layout.rows[ri]?.geo;
     for(const dn of notes){
       if(dn.hand==='none' || dn.x==null) continue;
       const isActive = activeNoteSet.has(findOriginalNote(dn));
@@ -2286,19 +2367,16 @@ function findOriginalNote(dn){
 // CURSOR & SEEK TOOLTIP
 // ═══════════════════════════════════════════════════════════
 function updateCursor(){
-  const c = document.getElementById('cursor');
-  if(viewMode === 'waterfall'){
-    c.style.display = 'none';
-    return;
-  }
-  c.style.display = '';
-  if(!midi || !layout.measures.length) return;
-  const curTick = timeToTicks(currentTime);
-  const pos = tickToPos(curTick);
-  if(!pos) return;
-  c.style.transform = `translate(${pos.x}px, ${pos.rowY - scrollOffset}px)`;
-  c.style.height = systemVisualHeight() + 'px';
-  c.style.width = (3 * scoreScale) + 'px';
+  const c=document.getElementById('cursor');
+  if(viewMode==='waterfall'){c.style.display='none';return;}
+  c.style.display='';
+  if(!midi||!layout.measures.length)return;
+  const curTick=timeToTicks(currentTime);
+  const pos=tickToPos(curTick);
+  if(!pos)return;
+  c.style.transform=`translate(${pos.x}px, ${pos.rowY-scrollOffset}px)`;
+  c.style.height=systemVisualHeight(pos.geo)+'px';
+  c.style.width=(3*scoreScale)+'px';
 }
 
 function setCursorSeeking(on){
@@ -3443,11 +3521,11 @@ document.getElementById('btnZoomUp').addEventListener('click',   ()=>{ setZoom(g
 // Recenter the score scroll so the cursor sits roughly in the vertical
 // middle of the viewport. Used after layout changes (zoom or scale).
 function recenterScrollOnCursor(){
-  if(viewMode !== 'score' || !midi || !layout.measures.length) return;
-  const pos = tickToPos(timeToTicks(currentTime));
-  if(!pos) return;
-  const viewH = getViewHeight();
-  const target = pos.rowY - viewH/2 + systemVisualHeight()/2;
+  if(viewMode!=='score'||!midi||!layout.measures.length)return;
+  const pos=tickToPos(timeToTicks(currentTime));
+  if(!pos)return;
+  const viewH=getViewHeight();
+  const target=pos.rowY-viewH/2+systemVisualHeight(pos.geo)/2;
   setScroll(target);
 }
 
